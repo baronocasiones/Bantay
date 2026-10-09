@@ -119,3 +119,30 @@ app.*.symbols
 !**/ios/**/default.perspectivev3
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
+# ============================================================================
+# Bantay project additions
+# ============================================================================
+
+# Local Android SDK copy on this workstation (3.3 GB, machine-specific)
+.android-sdk/
+
+# Model files. 1.5 GB, publisher-licensed, never commit.
+# Sideload to the device and verify with run-as md5sum instead.
+models/
+*.litertlm
+*.xnnpack_cache
+
+# Build output
+build/
+
+# IDE
+.idea/
+*.iml
+
+# Gradle caches and machine-specific config
+android/.gradle/
+android/local.properties
+
+# OS
+.DS_Store
+
