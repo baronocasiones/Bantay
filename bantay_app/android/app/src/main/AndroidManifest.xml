@@ -1,4 +1,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Path 1 sensor foundation (see docs/path1-module.md).
+
+         FOREGROUND_SERVICE_HEALTH type must be declared here, and also passed
+         to Service.startForeground(); a mismatch throws on Android 14+.
+         HIGH_SAMPLING_RATE_SENSORS is install-time (no runtime dialog) and is
+         the single highest-leverage permission decision in the build:
+         BODY_SENSORS is deliberately NOT declared because it is a
+         while-in-use permission and the health FGS would throw a
+         SecurityException once the app is backgrounded.
+
+         SEND_SMS and ACCESS_COARSE_LOCATION are not declared yet; they arrive
+         with the SMS slice of Path 1. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:label="bantay_app"
         android:name="${applicationName}"
@@ -12,10 +30,11 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
-            <!-- Specifies an Android theme to apply to this Activity as soon as
-                 the Android process has started. This theme is visible to the user
-                 while the Flutter UI initializes. After that, this theme continues
-                 to determine the Window background behind the Flutter UI. -->
+            <!-- Specifies an Android theme to apply to your Activity as soon as
+                 the Android process has started. This theme is visible to the
+                 user while your Flutter UI initializes. After that, this theme
+                 continues to determine the Window background behind your
+                 Flutter UI. -->
             <meta-data
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
@@ -25,6 +44,15 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <!-- Path 1: the always-on watcher. Kept local to the app; started from
+             the visible Setup activity (Android 12+ forbids starting a
+             foreground service from the background). -->
+        <service
+            android:name=".FallWatchService"
+            android:foregroundServiceType="health"
+            android:exported="false" />
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
@@ -35,7 +63,8 @@
          https://developer.android.com/training/package-visibility and
          https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
 
-         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+         In particular, if your app targets API 30 and above, this config is
+         needed to make the package visibility work. -->
     <queries>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>

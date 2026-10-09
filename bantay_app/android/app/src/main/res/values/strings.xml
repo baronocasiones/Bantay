@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Foreground service notification (FallWatchService). Kept quiet and
+         bilingual in the places the user actually reads. -->
+    <string name="channel_name">Fall watching</string>
+    <string name="channel_description">Shows while Bantay is watching for falls.</string>
+    <string name="notification_title">Bantay is watching</string>
+    <string name="notification_text">Nagbabantay para sa iyo.</string>
+</resources>

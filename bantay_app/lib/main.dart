@@ -10,6 +10,7 @@
 
 import 'dart:io';
 
+import 'package:bantay_app/sensor_debug.dart';
 import 'package:bantay_llm/bantay_llm.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
@@ -93,10 +94,65 @@ class BantayApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF00695C)),
         useMaterial3: true,
       ),
-      home: Path2Harness(
+      home: _ShellScaffold(
         modelPathOverride: modelPathOverride,
         backendOverride: backendOverride,
         autoPrepare: autoPrepare,
+      ),
+    );
+  }
+}
+
+/// Two destinations while the two paths are being built: the Path 2 text
+/// harness and the Path 1 sensor stream debug panel. Path 1 is the product;
+/// the panels exist until the real Setup/Guardian/Incident screens land.
+class _ShellScaffold extends StatefulWidget {
+  const _ShellScaffold({
+    required this.modelPathOverride,
+    required this.backendOverride,
+    required this.autoPrepare,
+  });
+
+  final String? modelPathOverride;
+  final PreferredBackend? backendOverride;
+  final bool autoPrepare;
+
+  @override
+  State<_ShellScaffold> createState() => _ShellScaffoldState();
+}
+
+class _ShellScaffoldState extends State<_ShellScaffold> {
+  int _index = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(
+        index: _index,
+        children: [
+          Path2Harness(
+            modelPathOverride: widget.modelPathOverride,
+            backendOverride: widget.backendOverride,
+            autoPrepare: widget.autoPrepare,
+          ),
+          const SensorDebugPanel(),
+        ],
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _index,
+        onDestinationSelected: (int value) => setState(() => _index = value),
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.article_outlined),
+            selectedIcon: Icon(Icons.article),
+            label: 'Path 2',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.sensors_outlined),
+            selectedIcon: Icon(Icons.sensors),
+            label: 'Sensors',
+          ),
+        ],
       ),
     );
   }
@@ -336,9 +392,11 @@ class Path2HarnessState extends State<Path2Harness> {
             ),
             const SizedBox(height: 12),
             _kv(theme, 'Cold load', '${_coldLoad!.inMilliseconds} ms'),
-            _kv(theme, 'Backend', resolveBackend(
-              override: widget.backendOverride,
-            ).name),
+            _kv(
+              theme,
+              'Backend',
+              resolveBackend(override: widget.backendOverride).name,
+            ),
             _kv(theme, 'Path', _modelPath),
           ],
         ),
