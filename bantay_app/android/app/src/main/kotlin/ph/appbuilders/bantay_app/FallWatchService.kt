@@ -11,10 +11,15 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
+import android.telephony.PhoneStateListener
+import android.telephony.ServiceState
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
 import android.util.Log
 
 /**
@@ -42,6 +47,9 @@ class FallWatchService : Service(), SensorEventListener {
     private var wakeLock: PowerManager.WakeLock? = null
     private val ring = AccelRingBuffer(RING_SAMPLES)
     private var sampling = false
+    private var telephonyManager: TelephonyManager? = null
+    private var telephonyCallback: TelephonyCallback? = null
+    private var legacyPhoneListener: PhoneStateListener? = null
 
     /** Drains new samples into [SensorChannel] every 50 ms. Runs on the service thread. */
     private val emitter = object : Runnable {
@@ -55,6 +63,7 @@ class FallWatchService : Service(), SensorEventListener {
         super.onCreate()
         sensorManager = getSystemService(SensorManager::class.java)
         accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        telephonyManager = getSystemService(TelephonyManager::class.java)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -94,6 +103,8 @@ class FallWatchService : Service(), SensorEventListener {
         }
 
         sampling = true
+        watchCellularService()
+        runCatching { SmsGateway.retryQueued(this) }
         Log.i(TAG, "sampling started at ${REQUESTED_HZ}Hz requested (${sensor.name})")
         updateSnapshot(running = true, sensorName = sensor.name, requestedHz = REQUESTED_HZ)
         handler.postDelayed(emitter, EMIT_PERIOD_MS)
@@ -107,6 +118,7 @@ class FallWatchService : Service(), SensorEventListener {
 
     private fun stopSampling(reason: String) {
         sampling = false
+        stopWatchingCellularService()
         serviceHandler?.removeCallbacks(emitter)
         serviceHandler = null
         accelerometer?.let { sensorManager?.unregisterListener(this, it) }
@@ -115,6 +127,51 @@ class FallWatchService : Service(), SensorEventListener {
         releaseWakeLock()
         updateSnapshot(running = false, sensorName = null, requestedHz = null)
         pushState(running = false, error = reason)
+    }
+
+    /** Retry only queued alerts when cellular service returns while monitoring. */
+    private fun watchCellularService() {
+        val manager = telephonyManager ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val callback = object : TelephonyCallback(), TelephonyCallback.ServiceStateListener {
+                    override fun onServiceStateChanged(state: ServiceState) {
+                        if (state.state == ServiceState.STATE_IN_SERVICE) {
+                            runCatching { SmsGateway.retryQueued(this@FallWatchService) }
+                        }
+                    }
+                }
+                manager.registerTelephonyCallback(mainExecutor, callback)
+                telephonyCallback = callback
+            } else {
+                @Suppress("DEPRECATION")
+                val listener = object : PhoneStateListener() {
+                    override fun onServiceStateChanged(state: ServiceState?) {
+                        if (state?.state == ServiceState.STATE_IN_SERVICE) {
+                            runCatching { SmsGateway.retryQueued(this@FallWatchService) }
+                        }
+                    }
+                }
+                @Suppress("DEPRECATION")
+                manager.listen(listener, PhoneStateListener.LISTEN_SERVICE_STATE)
+                legacyPhoneListener = listener
+            }
+        } catch (_: SecurityException) {
+            // SMS send still works on service/app start; listener is best effort.
+        } catch (_: UnsupportedOperationException) {
+            // Devices without telephony keep the alert queued.
+        }
+    }
+
+    private fun stopWatchingCellularService() {
+        val manager = telephonyManager ?: return
+        telephonyCallback?.let { manager.unregisterTelephonyCallback(it) }
+        telephonyCallback = null
+        legacyPhoneListener?.let {
+            @Suppress("DEPRECATION")
+            manager.listen(it, PhoneStateListener.LISTEN_NONE)
+        }
+        legacyPhoneListener = null
     }
 
     private fun promoteToForeground() {

@@ -62,3 +62,8 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+// Native state-machine unit tests; no Android runtime needed.
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+}
