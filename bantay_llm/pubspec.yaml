@@ -1,0 +1,17 @@
+name: bantay_llm
+description: Offline Path 2 alert composition for Bantay.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: '>=3.12.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_edge_ai: 2.1.1
+  flutter_edge_ai_litertlm: 1.10.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
