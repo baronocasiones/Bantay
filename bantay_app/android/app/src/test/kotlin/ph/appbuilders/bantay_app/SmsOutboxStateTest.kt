@@ -38,9 +38,28 @@ class SmsOutboxStateTest {
             SmsOutboxState.enqueue(null, "fall-4", "+639990000000", "Help"), 2
         )
         record = SmsOutboxState.sentPart(record, 0)
-        record = SmsOutboxState.failedPart(record, "radio_off")
+        record = SmsOutboxState.failedPart(record, 1, "radio_off")
         assertEquals("failed", record.state)
         assertTrue(record.sentParts.contains(0))
+    }
+
+    @Test fun multipartNoServiceQueuesOnlyAfterEveryPartFails() {
+        var record = SmsOutboxState.dispatch(
+            SmsOutboxState.enqueue(null, "fall-6", "+639990000000", "Help"), 2
+        )
+        record = SmsOutboxState.failedPart(record, 0, "no_service")
+        assertEquals("sending", record.state)
+        record = SmsOutboxState.failedPart(record, 1, "no_service")
+        assertEquals("queued", record.state)
+    }
+
+    @Test fun successfulPartAfterFailureNeverRetries() {
+        var record = SmsOutboxState.dispatch(
+            SmsOutboxState.enqueue(null, "fall-7", "+639990000000", "Help"), 2
+        )
+        record = SmsOutboxState.failedPart(record, 0, "no_service")
+        record = SmsOutboxState.sentPart(record, 1)
+        assertEquals("failed", record.state)
     }
 
     @Test fun terminalErrorNeverRetriesAutomatically() {

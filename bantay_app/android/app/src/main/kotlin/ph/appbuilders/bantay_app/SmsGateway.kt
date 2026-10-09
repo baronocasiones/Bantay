@@ -132,7 +132,7 @@ object SmsGateway {
                     SmsManager.RESULT_ERROR_NO_SERVICE -> "no_service"
                     else -> "sms_error_$resultCode"
                 }
-                SmsOutboxState.failedPart(current, error)
+                SmsOutboxState.failedPart(current, part, error)
             }
             ACTION_DELIVERED -> if (resultCode == Activity.RESULT_OK) {
                 SmsOutboxState.deliveredPart(current, part)

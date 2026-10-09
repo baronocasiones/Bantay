@@ -9,6 +9,7 @@ data class SmsOutboxRecord(
     val attempts: Int = 0,
     val partCount: Int = 0,
     val sentParts: Set<Int> = emptySet(),
+    val failedParts: Set<Int> = emptySet(),
     val deliveredParts: Set<Int> = emptySet(),
     val error: String? = null,
 )
@@ -21,7 +22,7 @@ object SmsOutboxState {
         require(record.state == "queued" && partCount > 0)
         return record.copy(
             state = "sending", attempts = record.attempts + 1,
-            partCount = partCount, sentParts = emptySet(),
+            partCount = partCount, sentParts = emptySet(), failedParts = emptySet(),
             deliveredParts = emptySet(), error = null,
         )
     }
@@ -31,6 +32,7 @@ object SmsOutboxState {
         if (part !in 0 until record.partCount) return record
         val sent = record.sentParts + part
         val state = when {
+            record.failedParts.isNotEmpty() -> "failed"
             sent.size < record.partCount -> "sending"
             record.deliveredParts.size == record.partCount -> "delivered"
             else -> "sent"
@@ -47,13 +49,16 @@ object SmsOutboxState {
         return record.copy(state = state, deliveredParts = delivered)
     }
 
-    fun failedPart(record: SmsOutboxRecord, error: String): SmsOutboxRecord {
-        if (record.state != "sending") return record
-        // A multipart send with any successful segment cannot be retried safely:
-        // the recipient could receive duplicate or corrupted messages.
+    fun failedPart(record: SmsOutboxRecord, part: Int, error: String): SmsOutboxRecord {
+        if (record.state != "sending" || part !in 0 until record.partCount) return record
+        val failed = record.failedParts + part
         val retryable = error == "radio_off" || error == "no_service"
-        val state = if (record.sentParts.isEmpty() && retryable) "queued" else "failed"
-        return record.copy(state = state, error = error)
+        val state = when {
+            record.sentParts.isNotEmpty() || !retryable -> "failed"
+            failed.size == record.partCount -> "queued"
+            else -> "sending" // Other parts may still reach the network.
+        }
+        return record.copy(state = state, failedParts = failed, error = error)
     }
 
     fun fail(record: SmsOutboxRecord, error: String) = record.copy(state = "failed", error = error)
