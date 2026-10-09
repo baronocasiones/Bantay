@@ -86,3 +86,27 @@ run under fake-async, where the real `File.exists()` probe inside
 
 - [Path 2 module](path2-llm-module.md)
 - Project spec: `SPEC.md`, `architecture.md`, `ui-flow.md`
+
+## Update — 2026-10-09: the harness gained a second destination
+
+Path 1 slice 1 landed in this app, so several statements above are superseded
+(added additively per the archive rule):
+
+- The app is **no longer single-screen**. `lib/main.dart` now wraps both panels
+  in `_ShellScaffold` (`NavigationBar` with Path 2 / Sensors destinations,
+  `IndexedStack` children). `Path2Harness` is unchanged; `BantayApp` forwards
+  its hooks as before. Structure lines above stay true for the Path 2 half.
+- "It does not implement Path 1" is now false in the streaming sense: a
+  `FallWatchService` samples the accelerometer and the **Sensors** tab shows
+  the live stream. Impact detection, countdown, and SMS remain Path 1 work.
+- New Android sources under
+  `android/app/src/main/kotlin/ph/appbuilders/bantay_app/`: `FallWatchService`,
+  `AccelRingBuffer`, `SensorChannel`, and the extended `MainActivity`.
+  `AndroidManifest.xml` gained the sensor-side permissions and the
+  `foregroundServiceType="health"` service declaration; `values/strings.xml`
+  is new.
+- New Dart files: `lib/sensor_payload.dart` (pure decode contract),
+  `lib/sensor_debug.dart` (fenced debug panel). New tests:
+  `test/sensor_payload_test.dart`, `test/sensor_debug_test.dart`.
+
+Full detail, conventions, and the device checklist: [Path 1 module](path1-module.md).

@@ -1,6 +1,6 @@
 # BANTAY Path 2 phone harness
 
-This Flutter app exercises the local `bantay_llm` module on an Android phone. It shows model load time, fixed alerts, generated results, elapsed time, and whether the LLM text passed the fact check. The sample incident is synthetic; this app does not yet connect to Path 1 detection or SMS.
+This Flutter app exercises the local `bantay_llm` module on an Android phone. It shows model load time, fixed alerts, generated results, elapsed time, and whether the LLM text passed the fact check. The sample incident is synthetic; this app does not yet handle a real impact (countdown, SMS), but it does stream live accelerometer data from the Path 1 sensor service: see the **Sensors** tab and `../../docs/path1-module.md`. The detector itself arrives in the next slice of Path 1.
 
 ## Requirements
 

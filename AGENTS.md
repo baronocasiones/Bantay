@@ -143,3 +143,98 @@ and shortening the prompt. Both are the fixes that would work and both live
 outside Path 2's 2-second contract. SPEC.md's Hour-16 gate says ship
 template-only and present Path 1 as the product; prompt tuning on demo eve is
 explicitly discouraged.
+
+### 2026-10-09 — Path 1 slice 1: sensor foundation (`bantay_app`)
+
+First slice of the safety-critical path. The watcher's eyes: accelerometer
+stream from a Kotlin foreground service into Dart, observable in a fenced debug
+panel. Picked up from the Hour-16 gate decision to present Path 1 as the
+product.
+
+**Implemented**
+
+- `FallWatchService`: FGS `health`, wake lock scoped to sampling, HandlerThread
+  with the listener and emitter pinned to it, sample rate requested at 50 Hz,
+  batches emitted at 20 Hz.
+- `AccelRingBuffer`: 4 s circular buffer with total-append sequence numbers;
+  drain reports how many samples were overwritten instead of hiding stalls.
+  Pure Kotlin, no Android imports.
+- `SensorChannel` bridge + `MainActivity` wiring: start/stop/attach/detach in,
+  `batch`/`state` out; the service is started only from the visible activity
+  (Android 12+ rule) and `POST_NOTIFICATIONS` is requested best-effort, never
+  blocking the start.
+- Dart side: `sensor_payload.dart` (pure decode contract, seq math, windowed
+  RateTracker) and `sensor_debug.dart` (fenced panel: measured vs requested
+  rate, seq, dropped, rejected, peak g, live magnitude strip). `main.dart` now
+  hosts both panels under a two-destination NavigationBar.
+- Manifest: sensor-side permission set + service declaration; `SEND_SMS` and
+  location deferred to the SMS slice.
+- `docs/path1-module.md` created (API surface, wire format, conventions,
+  device checklist).
+
+**Verified on the authoring box** — 13/13 payload-contract tests under
+`dart test`; `dart format` clean on all new files. **Not verified** — no
+Android SDK or Flutter SDK on that machine: Kotlin compile, `flutter test`,
+`flutter analyze`, and the device checklist all wait for the dev machine.
+
+**Conventions established**
+
+- FGS type declared in manifest **and** `startForeground` — Android 14+ throws
+  on mismatch.
+- Sequence advance only on delivery: a missing Dart channel retries from the
+  ring instead of silently skipping samples.
+- Timestamps cross the channel as a `double[]` (Float64List), never `float[]`:
+  elapsedRealtime nanos through float32 would smear the 20 ms period at uptime.
+- Measured rate is reported separately from the requested rate; the request is
+  never evidence.
+- Kotlin seams (buffer) and Dart seams (decode) are kept dependency-free so
+  they are unit-testable without a device; device behaviour is pinned to a
+  checklist, not assumed.
+- Debug UI carries the same "Test only; never use for an emergency alert."
+  fence as the Path 2 diagnostics.
+
+**Not done, deliberately** — detection logic, SMS, gyroscope, backfill reads of
+pre-impact history, and the six product screens. Those are slice 2+ per
+`docs/path1-module.md`; the stale `_modelFileName` default in `main.dart`
+(broken model filename, flagged in `docs/phone-harness.md`) is a Path 2 concern
+and was left untouched.
+
+### 2026-10-10 — Path 1 first device verification (`bantay_app`)
+
+First compile and run of the Kotlin side, on the demo phone (SM-A127F).
+Toolchain had to be built on the dev box from scratch: Flutter 3.47.7,
+Android platform 36 + build-tools + NDK 28.2.13676358, Gradle 9.3.1 wrapper
+generated (the checkout has none), Temurin JDK 21 (system JDK 27 is too new
+for AGP 9.1's jlink transform; `java-17-openjdk` here is a JRE without
+`javac`).
+
+**Implemented** — three device-only bugs found and fixed, all invisible to
+the laptop tests:
+
+- `SensorChannel.postBatch` invoked the MethodChannel from the service
+  HandlerThread; `FlutterJNI` requires @UiThread and the app crash-looped.
+  Channel invocations now queue on `Handler(Looper.getMainLooper())`, and
+  `postBatch` reports delivery through a main-thread callback that advances
+  the consumer sequence — to the batch's captured seq, not to a
+  `ring.lastSeq` re-read at callback time (that race would skip samples).
+- The wire carries m/s²; decode converts to g exactly once (`ms2PerG` in
+  `sensor_payload.dart`). A resting phone had read "10.36 g".
+- Stop/start left stale stream numbers (the panel's seq de-dup swallowed the
+  restarted service's fresh sequence); a `running=false` state push clears
+  live indicators, and `attachConsumer` pushes a state snapshot.
+
+**Verified** — full device checklist filled in `docs/path1-module.md`:
+measured 41.8–49.8 Hz, cadence 19.3–19.9 Hz, carpet drop × 2 at **11.09 g**
+vs the 3.5 g cascade threshold, 65 s screen-off with sampling intact, cold
+attach re-drains with honest dropped count (147661), notification lifecycle
+correct. The signal path works; the detector itself is still slice 2.
+
+**Conventions established**
+
+- Channel invocations to Dart are main-thread-only; the service thread
+  touches the ring, never the channel.
+- One unit conversion, at the decode boundary; everything downstream sees g.
+- Device evidence comes from `screencap`; `uiautomator` dumps lag this panel's
+  live semantics and are not a record.
+- Laptop-green is not device-green: every bug above existed only because the
+  Kotlin side had never run anywhere.
