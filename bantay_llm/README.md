@@ -55,7 +55,7 @@ await smsSender.send(alert.text);
 await incidentStore.recordLlmUsed(alert.llmUsed);
 ```
 
-The host app supplies `startCountdown`, `alertAlreadySent`, `smsSender`, and `incidentStore`. `AlertResult.llmUsed` maps to the `incidents.llm_used` field in `architecture.md`. Preserve the exact `alert.text` in the SMS outbox and Alert Sent screen. Do not wait for `compose` when the user presses SEND HELP.
+The host app supplies `startCountdown`, `alertAlreadySent`, `smsSender`, and `incidentStore`. `AlertResult.llmUsed` maps to the `incidents.llm_used` field in `docs/architecture.md`. Preserve the exact `alert.text` in the SMS outbox and Alert Sent screen. Do not wait for `compose` when the user presses SEND HELP.
 
 The composer enforces a 2-second wall-clock limit, asks the native session to stop on timeout, limits model output to 40 tokens, and rejects empty, long, or numerically inconsistent text. This is a format and numeric check, not a full semantic proof; review actual model wording on the demo phone. Rejected text never reaches SMS. The template is complete when no model is installed.
 
@@ -100,12 +100,12 @@ Correct prefix, correct coordinates, correct impact force, correct hedging. It
 was still rejected by `_isGrounded`, correctly: no timestamp, and a stray `7`
 from the stillness clause. A 0.6B model reliably produces plausible framing and
 unreliably produces complete, correct facts. That is precisely the failure mode
-SPEC.md §7 describes, and it is why the composer keeps a hard numeric check
+docs/SPEC.md §7 describes, and it is why the composer keeps a hard numeric check
 rather than trusting the output.
 
 ### Recommendation
 
-Per SPEC.md's Hour-16 gate, present Path 1 as the product and keep the template
+Per docs/SPEC.md's Hour-16 gate, present Path 1 as the product and keep the template
 as the shipped alert. Path 2 is working code with a correct fallback, not a
 blocker. Two changes would make live wording viable, both outside Path 2's
 2-second contract:

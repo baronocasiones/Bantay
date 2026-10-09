@@ -22,9 +22,9 @@ the product.** See `docs/path2-llm-module.md`.
 | `bantay_llm/` | Dart-only Path 2 module. No platform code. |
 | `bantay_app/` | Flutter harness to exercise Path 2 on a phone. Not the product shell. |
 | `models/` | `.litertlm` files, gitignored. Do not commit. |
-| `SPEC.md` | Authoritative spec: cascade, alert prompt, gates. |
-| `architecture.md` | Data flow, module ownership, session lifecycle. |
-| `ui-flow.md` | Screen flow. |
+| `docs/SPEC.md` | Authoritative spec: cascade, alert prompt, gates. |
+| `docs/architecture.md` | Data flow, module ownership, session lifecycle. |
+| `docs/ui-flow.md` | Screen flow. |
 | `docs/` | Per-module archive, appended by the End protocol. |
 
 ## Environment
@@ -238,3 +238,8 @@ correct. The signal path works; the detector itself is still slice 2.
   live semantics and are not a record.
 - Laptop-green is not device-green: every bug above existed only because the
   Kotlin side had never run anywhere.
+
+**Housekeeping (same session)** — removed the duplicate root copies of
+`SPEC.md`, `architecture.md`, `ui-flow.md` and the two architecture images;
+`docs/` holds the single newer canonical set (commit `a3c7057` superseded the
+root originals), and the AGENTS.md layout table now points at `docs/`.
