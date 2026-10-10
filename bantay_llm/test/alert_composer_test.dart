@@ -117,8 +117,47 @@ void main() {
 
     expect(result.llmUsed, isTrue);
     expect(result.text, output);
-    expect(generator.lastPrompt, contains('Reply in English'));
-    expect(generator.lastPrompt, contains('Contact: Ana'));
+    expect(generator.lastPrompt, contains('Write one English SMS'));
+  });
+
+  test('production wording can omit location for native GPS suffix', () async {
+    const output =
+        'BANTAY alert: Possible fall at 2:14 AM; 7.2g impact; '
+        'walking before impact; no movement for 8 seconds.';
+    final generator = FakeGenerator((_) async => output);
+    final result = await AlertComposer(
+      generator: generator,
+    ).compose(facts, AlertLanguage.english, includeLocation: false);
+
+    expect(result.llmUsed, isTrue);
+    expect(result.text, output);
+    expect(generator.lastPrompt, isNot(contains('Location unavailable')));
+    expect(generator.lastPrompt, isNot(contains('14.59950')));
+    expect(generator.lastPrompt!.length, lessThan(320));
+  });
+
+  test('production model cannot claim location is unavailable', () async {
+    const output =
+        'BANTAY alert: Possible fall at 2:14 AM; 7.2g impact; '
+        'walking before impact; no movement for 8 seconds. Location unavailable.';
+    final generator = FakeGenerator((_) async => output);
+    final result = await AlertComposer(
+      generator: generator,
+    ).compose(facts, AlertLanguage.english, includeLocation: false);
+
+    expect(result.llmUsed, isFalse);
+  });
+
+  test('production composer honors caller countdown timeout', () async {
+    final pending = Completer<String>();
+    final generator = FakeGenerator((_) => pending.future);
+    final result = await AlertComposer(
+      generator: generator,
+      timeout: const Duration(milliseconds: 15),
+    ).compose(facts, AlertLanguage.english, includeLocation: false);
+
+    expect(result.llmUsed, isFalse);
+    expect(generator.stopCalls, 1);
   });
 
   test('valid grounded Tagalog text is accepted', () async {
@@ -133,7 +172,7 @@ void main() {
 
     expect(result.llmUsed, isTrue);
     expect(result.text, output);
-    expect(generator.lastPrompt, contains('Reply in Tagalog'));
+    expect(generator.lastPrompt, contains('Write one Tagalog SMS'));
   });
 
   test('diagnostics can inspect rejected text without using it', () async {

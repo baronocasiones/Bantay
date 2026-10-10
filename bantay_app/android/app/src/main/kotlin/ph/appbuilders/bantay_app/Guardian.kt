@@ -18,19 +18,37 @@ import android.content.Context
 object Guardian {
     @Volatile
     private var runtime: GuardianRuntime? = null
+    @Volatile
+    private var historyJournal: AsyncIncidentJournal? = null
 
     fun runtime(context: Context): GuardianRuntime =
         runtime ?: synchronized(this) {
             runtime ?: build(context.applicationContext).also { runtime = it }
         }
 
-    private fun build(app: Context): GuardianRuntime = GuardianRuntime(
-        store = SharedPrefsIncidentStore(app),
-        sendSms = { id, number, text ->
-            SmsGateway.enqueue(app, id, number, text).state
-        },
-        emit = { AlertChannel.postState(it) },
-    )
+    private fun build(app: Context): GuardianRuntime {
+        val movementProfileStore = SharedPrefsMovementBaselineStore(app)
+        val journal = AsyncIncidentJournal(IncidentHistoryDb(app))
+        historyJournal = journal
+        return GuardianRuntime(
+            store = SharedPrefsIncidentStore(app),
+            sendSms = { id, number, text ->
+                SmsGateway.enqueue(app, id, number, text).state
+            },
+            emit = { AlertChannel.postState(it) },
+            locationSource = EmergencyLocationProvider(app),
+            movementBaseline = MovementBaseline(
+                initial = movementProfileStore.load(),
+                onPersist = movementProfileStore::save,
+            ),
+            journal = journal,
+        )
+    }
+
+    fun historySnapshot(context: Context): List<IncidentHistoryRecord> {
+        runtime(context.applicationContext)
+        return historyJournal?.snapshot().orEmpty()
+    }
 
     /** Reattach/restart recovery: outbox is authoritative for any staged send. */
     fun reconcile(context: Context): GuardianState {
@@ -53,6 +71,9 @@ object Guardian {
 
     /** Test seam: drops the cached runtime so a fresh one builds on next use. */
     fun resetForTest() {
-        synchronized(this) { runtime = null }
+        synchronized(this) {
+            runtime = null
+            historyJournal = null
+        }
     }
 }

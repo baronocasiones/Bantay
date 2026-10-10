@@ -1,6 +1,6 @@
 # BANTAY — UI Flow
 
-Demo scope only. No auth, no accounts, six screens.
+Demo scope only. No auth, no accounts, seven screens.
 
 ![UI flow](assets/bantay-ui-flow.jpg)
 
@@ -21,7 +21,8 @@ Status badge `◉ LIVE`. Centered "watching for you" with a calm breathing pulse
 
 - Stat rows: baseline (your gait) · last incident · sensitivity
 - Live accel waveform strip (real-time, not decorative)
-- Buttons: **I need help** · **History**
+- Primary action: **I need help**. Bottom navigation switches Guardian/History;
+  Settings gear beside Live opens the existing contact setup flow.
 
 ### 3 · Incident
 
@@ -44,12 +45,21 @@ session.
 
 ### 5 · History (local, offline)
 
-List of incidents: relative time, peak g, status (`sent` / `cancelled`).
+List of saved real incidents only: date, source, measured impact when
+available, contact, and actual SMS/countdown outcome. Filters: All, Sent, and
+Cancelled. Search is a local text match over incident ID, type, date, and
+contact name; it does not answer conversational questions. No sample incidents
+are inserted. A History card opens the matching details record.
 
-Search box: "what happened last Tuesday?" → answer rendered as a short reply.
-All local. Works in a dead zone.
+### 6 · Incident Details
 
-### 6 · Eval
+Shows saved detection facts, incident ID/type, real timeline events, emergency
+contact and SMS outcome, technical details, and exact SMS text only when an
+outbox record exists. Cancelled incidents have no SMS preview. Unknown facts
+stay unavailable; manual SOS omits fall-only details. Back returns to History
+with its prior search and filter.
+
+### 7 · Eval
 
 Precision 94% · Recall 91% · F1 92.5%, with proportional bars.
 Footer: UCI HAR + synthetic · n=12,400 windows.
@@ -68,7 +78,9 @@ not just in the deck.
 3 --15s expires-----------------> 4
 3 --user OKs---------------------> 2
 4 --tap History (navigation)-----> 5
-5 --tap Eval (navigation)--------> 6
+5 --tap incident card------------> 6
+6 --Back to Incident History-----> 5
+5 --tap Eval (navigation)--------> 7
 ```
 
 Two arrow types in the diagram:
@@ -89,8 +101,8 @@ grey one is you clicking.
 2. **Airplane mode on screen 2**
    Turn it on. Nothing changes. Say nothing. Let them notice on their own.
 
-3. **Screen 5 "what happened last Tuesday?"**
-   Conversational recall over a private log, in a dead zone.
+3. **Screen 5 local search and filters**
+   Find saved incidents by ID, type, date, or contact without a network.
 
 ---
 

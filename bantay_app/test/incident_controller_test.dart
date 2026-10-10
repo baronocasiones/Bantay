@@ -16,6 +16,8 @@ class _Gateway implements AlertGateway {
   @override
   Future<bool> requestSmsPermission() async => true;
   @override
+  Future<bool> requestLocationPermission() async => true;
+  @override
   Future<SmsSubmission> send({
     required String incidentId,
     required String number,

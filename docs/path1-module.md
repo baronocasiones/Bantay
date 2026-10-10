@@ -5,9 +5,20 @@ countdown, and SMS; Path 2 (`bantay_llm`) only rewrites alert text. The judge
 answer and the build gates live in `SPEC.md`; this module is where Path 1
 code accrues, one slice at a time.
 
-This slice: **the watcher's eyes.** An accelerometer stream, sampled on a
-service thread and delivered to Dart at 20 Hz, observable in a fenced debug
-panel. No detection logic yet — that is slice 2.
+Path 1 now includes the accelerometer watcher, fall cascade, countdown, SMS,
+optional emergency coordinates, and local incident History/Details. The debug
+sensor panel remains fenced as test-only.
+
+## Local incident history
+
+`IncidentHistoryDb` stores real fall and manual SOS records in the app-private
+SQLite database. `GuardianRuntime` writes incident facts and timeline events at
+native state transitions; Flutter reads snapshots through the existing alert
+MethodChannel and owns display, keyword search, filters, and navigation. The
+SMS body and current carrier state come from `SmsOutboxDb`, so cancelled
+countdowns have no SMS preview and failed/uncertain outcomes stay explicit.
+History has no cloud sync or seeded demo rows. Android's app-data reset clears
+the journal.
 
 ## Files
 
@@ -46,18 +57,56 @@ Accelerometer components go over the wire as **m/s²** (raw
 `SensorEvent.values`) and are converted to **g** exactly once, at the Dart
 decode boundary (`ms2PerG = 9.80665` in `sensor_payload.dart`). Found on
 device: without the conversion a resting phone reads "9.8" and every
-threshold downstream of the cascade (SPEC §6: peak > 3.5 g) misfires.
+threshold downstream of the cascade (SPEC §6: peak > 5.0 g) misfires.
 
 ## Conventions established
 
+### Movement learning is context only
+
+The native detector keeps a private on-device profile of clean 2-second
+movement-variability windows and persists it locally. It skips impact candidates,
+high-magnitude samples, cooldowns, and a 10-second guard after any impact
+candidate. The profile can refine the `still` / `walking` / `running` label
+attached to an event. It never changes the fall trigger or the 5.0 g impact,
+60-degree rotation, or 2-second stillness gates. This is statistical adaptation,
+not LLM fine-tuning; the local model remains outside the sensor-time path.
+
+### SMS location uses GSM-safe ASCII
+
+Coordinates and accuracy are emitted in compact ASCII; map URLs are omitted.
+The Maps link was removed after a one-segment fall alert failed on the demo
+phone while a short SOS succeeded on the same SIM. The link is a possible
+content trigger, not a confirmed cause. The complete alert is limited to one
+GSM-7 segment (160 characters); longer model wording falls back to a concise
+fact-based alert. Android network error 17 is surfaced as `network_error`;
+failed SMS is not automatically resent because delivery can be uncertain.
+
+### False-positive threshold adjustment
+
+After the device log showed ordinary desk handling at 4.65 g and carpet drops
+at 11.09 g, the impact gate was raised from 3.5 g to 5.0 g and the rotation gate
+restored from 45 to 60 degrees. The existing carpet-drop observations predate
+this threshold change, so a new device drop and ordinary-movement check is still
+needed before treating this setting as validated.
+
 ### The FGS type is declared twice, on purpose
 
-`android:foregroundServiceType="health"` in the manifest **and**
-`ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH` passed to `startForeground`.
-Android 14+ throws on a mismatch. The permission set (`FOREGROUND_SERVICE`,
-`FOREGROUND_SERVICE_HEALTH`, `HIGH_SAMPLING_RATE_SENSORS`, `POST_NOTIFICATIONS`,
-`WAKE_LOCK`) is the sensor-side slice; `SEND_SMS` and `ACCESS_COARSE_LOCATION`
-arrive with the SMS slice.
+`android:foregroundServiceType="health|location"` in the manifest; at runtime,
+`startForeground` receives `health` and adds `location` only when coarse or fine
+access is granted. Android 14+ throws on a mismatch. A location-type failure
+on a sticky background restart falls back to the health type so monitoring and
+SMS remain active.
+
+### Emergency location stays optional and time-bounded
+
+Setup requests coarse and fine location while the Activity is visible. Either
+grant enables coordinates; Bantay never requests background location. After a
+confirmed fall, the watcher requests a current fix on GPS and network providers
+in parallel, cancels after 10 seconds, and accepts only a fix no older than 30
+seconds with accuracy within 5 km. The fixed 15-second countdown is unchanged.
+At send time, the final SMS text gets coordinates and accuracy; without a
+usable fix it says `Location unavailable`. No map URL is sent. Manual SOS never
+waits for GPS and uses a last-known fix only if it is at most two minutes old.
 
 ### SEQ bookkeeping: deliver before advancing
 
@@ -153,8 +202,8 @@ slice 2 starts.
 - [x] "Stop sampling" → notification gone; "Start" works again — stop shows
       `service destroyed`, rates freeze, notification dismisses; restart
       re-streams end to end.
-- [x] Drop the phone on carpet: `Peak magnitude` clearly exceeds 3.5 g
-      — two carpet drops registered **11.09 g** (3.2× threshold). A desk
+- [x] Drop the phone on carpet: `Peak magnitude` clearly exceeds 5.0 g
+      — two carpet drops registered **11.09 g** (2.2× threshold). A desk
       handling event during the screen-off test read 4.65 g. At rest the
       peak reads ~1.0 g (post-units-fix).
 - [x] Cold start with service running (reboot-less): attach re-drains
@@ -304,3 +353,11 @@ tests — the Kotlin had never run anywhere):
 **Not done** — detector (slice 2), SMS, gyroscope, the six product screens.
 The screen-off test used a 65 s window with a partial wake lock; battery-kill
 behaviour remains untested, as flagged in the original checklist.
+
+## Session record — 2026-10-10 (local incident history UI)
+
+Added the app-private incident journal, History and Incident Details screens,
+real SMS status/body enrichment from the durable outbox, local text filtering,
+and Guardian/History navigation. The Settings gear beside Live opens the
+existing setup/contact flow. Automated and device verification were not run in
+this change.

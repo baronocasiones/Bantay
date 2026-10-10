@@ -20,6 +20,7 @@ class MainActivity : FlutterActivity() {
     private var sensorsChannel: MethodChannel? = null
     private var alertsChannel: MethodChannel? = null
     private var smsPermissionResult: MethodChannel.Result? = null
+    private var locationPermissionResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -41,6 +42,8 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         smsPermissionResult?.success(false)
         smsPermissionResult = null
+        locationPermissionResult?.success(false)
+        locationPermissionResult = null
         AlertChannel.channel = null
         alertsChannel?.setMethodCallHandler(null)
         alertsChannel = null
@@ -152,6 +155,16 @@ class MainActivity : FlutterActivity() {
                     requestPermissions(arrayOf(Manifest.permission.SEND_SMS), REQUEST_SMS)
                 }
             }
+            "requestLocationPermission" -> {
+                if (hasLocationPermission()) {
+                    result.success(true)
+                } else if (locationPermissionResult != null) {
+                    result.success(false)
+                } else {
+                    locationPermissionResult = result
+                    requestPermissions(LOCATION_PERMISSIONS, REQUEST_LOCATION)
+                }
+            }
             "sendSms" -> {
                 val id = call.argument<String>("incidentId")?.trim().orEmpty()
                 val number = call.argument<String>("number")?.trim().orEmpty()
@@ -173,6 +186,22 @@ class MainActivity : FlutterActivity() {
                     result.success(emptyList<Map<String, Any?>>())
                 }
             }
+            "incidentHistorySnapshot" -> {
+                try {
+                    val outboxById = SmsGateway.snapshot(this).associateBy { it["incidentId"] }
+                    val records = Guardian.historySnapshot(applicationContext).map { record ->
+                        val outbox = outboxById[record.incidentId]
+                        record.copy(
+                            stage = outbox?.get("state") as? String ?: record.stage,
+                            smsText = outbox?.get("text") as? String,
+                            error = outbox?.get("error") as? String ?: record.error,
+                        ).toMap()
+                    }
+                    result.success(mapOf("records" to records))
+                } catch (_: Exception) {
+                    result.success(mapOf("error" to "history_unavailable"))
+                }
+            }
             else -> result.notImplemented()
         }
     }
@@ -190,6 +219,10 @@ class MainActivity : FlutterActivity() {
         this, Manifest.permission.SEND_SMS,
     ) == PackageManager.PERMISSION_GRANTED
 
+    private fun hasLocationPermission() = LOCATION_PERMISSIONS.any {
+        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<out String>, grantResults: IntArray,
     ) {
@@ -199,6 +232,13 @@ class MainActivity : FlutterActivity() {
             smsPermissionResult?.success(granted)
             smsPermissionResult = null
             if (granted) runCatching { SmsGateway.retryQueued(this) }
+        } else if (requestCode == REQUEST_LOCATION) {
+            val granted = permissions.indices.any { index ->
+                permissions[index] in LOCATION_PERMISSIONS &&
+                    grantResults.getOrNull(index) == PackageManager.PERMISSION_GRANTED
+            }
+            locationPermissionResult?.success(granted)
+            locationPermissionResult = null
         }
     }
 
@@ -219,5 +259,10 @@ class MainActivity : FlutterActivity() {
     private companion object {
         const val REQUEST_NOTIFICATIONS = 6301
         const val REQUEST_SMS = 6302
+        const val REQUEST_LOCATION = 6303
+        val LOCATION_PERMISSIONS = arrayOf(
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+        )
     }
 }

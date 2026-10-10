@@ -34,6 +34,7 @@ abstract interface class AlertGateway {
   Stream<SmsSubmission> get states;
   Future<bool> smsPermissionStatus();
   Future<bool> requestSmsPermission();
+  Future<bool> requestLocationPermission();
   Future<SmsSubmission> send({
     required String incidentId,
     required String number,
@@ -62,6 +63,9 @@ class NativeAlertGateway implements AlertGateway {
   @override
   Future<bool> requestSmsPermission() async =>
       await _channel.invokeMethod<bool>('requestSmsPermission') ?? false;
+  @override
+  Future<bool> requestLocationPermission() async =>
+      await _channel.invokeMethod<bool>('requestLocationPermission') ?? false;
   @override
   Future<SmsSubmission> send({
     required String incidentId,

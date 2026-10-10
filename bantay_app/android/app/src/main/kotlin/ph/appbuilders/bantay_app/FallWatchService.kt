@@ -222,7 +222,26 @@ class FallWatchService : Service(), SensorEventListener {
             .build()
         // minSdk is 30; the 3-argument startForeground (type declared) is the
         // form Android 14+ requires and must match the manifest value.
-        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH)
+        val locationGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_COARSE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        val foregroundTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH or
+            if (locationGranted) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0
+        try {
+            startForeground(NOTIFICATION_ID, notification, foregroundTypes)
+        } catch (error: SecurityException) {
+            // A sticky restart can happen while the app is backgrounded, when
+            // Android will reject a location FGS backed by while-in-use access.
+            // Keep the health watcher alive; location then degrades to fallback.
+            Log.w(TAG, "Location FGS unavailable; keeping health watcher", error)
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH,
+            )
+        }
     }
 
     private fun createNotificationChannel() {

@@ -35,10 +35,16 @@ class BantayPath2 {
     }
   }
 
-  Future<AlertResult> compose(ImpactFacts facts, AlertLanguage language) {
+  Future<AlertResult> compose(
+    ImpactFacts facts,
+    AlertLanguage language, {
+    Duration timeout = const Duration(seconds: 2),
+    bool includeLocation = true,
+  }) {
     return AlertComposer(
       generator: _generator.isReady ? _generator : null,
-    ).compose(facts, language);
+      timeout: timeout,
+    ).compose(facts, language, includeLocation: includeLocation);
   }
 
   /// Phone-harness measurement only. Never wait for this in an alert flow.

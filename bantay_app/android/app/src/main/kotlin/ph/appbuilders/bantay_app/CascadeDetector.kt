@@ -30,9 +30,11 @@ data class DetectorDiagnostics(
     )
 }
 
-class CascadeDetector {
+class CascadeDetector(
+    private val movementBaseline: MovementBaseline = MovementBaseline(),
+) {
     companion object {
-        const val IMPACT_THRESHOLD_G = 3.5
+        const val IMPACT_THRESHOLD_G = 5.0
         private const val ROTATION_THRESHOLD_DEGREES = 60.0
         private const val ROTATION_WINDOW_MS = 500.0
         private const val STILLNESS_WINDOW_MS = 2000.0
@@ -70,6 +72,8 @@ class CascadeDetector {
     private var lastTMs: Double? = null
     private var suppressedUntilMs = Double.NEGATIVE_INFINITY
     private var cooldownUntilMs = Double.NEGATIVE_INFINITY
+    private var trainingAfterMs = Double.NEGATIVE_INFINITY
+    private var samplesSinceTrainingWindow = 0
     private val recentMagnitudes = ArrayDeque<Double>()
     var diagnostics = DetectorDiagnostics()
         private set
@@ -99,6 +103,7 @@ class CascadeDetector {
         if (candidate == null && magnitude > IMPACT_THRESHOLD_G &&
             tMs >= suppressedUntilMs && tMs >= cooldownUntilMs &&
             priorGravity != null && priorGravity.norm > 0.5) {
+            trainingAfterMs = max(trainingAfterMs, tMs + 10_000.0)
             candidate = Candidate(tMs, magnitude, priorGravity, classifyBeforeImpact())
             diagnostics = DetectorDiagnostics(magnitude, true, 0.0, 0.0, "candidate")
             return null
@@ -151,18 +156,33 @@ class CascadeDetector {
         if (candidate == null) {
             recentMagnitudes.addLast(magnitude)
             if (recentMagnitudes.size > 100) recentMagnitudes.removeFirst()
+            if (magnitude <= 2.0 && tMs >= suppressedUntilMs &&
+                tMs >= cooldownUntilMs && tMs >= trainingAfterMs &&
+                recentMagnitudes.size == 100
+            ) {
+                samplesSinceTrainingWindow += 1
+                if (samplesSinceTrainingWindow >= 25) {
+                    samplesSinceTrainingWindow = 0
+                    movementBaseline.observe(windowVariance())
+                }
+            }
         }
         return null
     }
 
     private fun classifyBeforeImpact(): String {
         if (recentMagnitudes.size < 25) return "unknown"
-        val mean = recentMagnitudes.average()
-        val variance = recentMagnitudes.sumOf { (it - mean) * (it - mean) } / recentMagnitudes.size
-        return when {
+        val variance = windowVariance()
+        val ordinaryActivity = when {
             variance < 0.01 -> "still"
             variance > 0.25 -> "running"
             else -> "walking"
         }
+        return movementBaseline.classify(variance, ordinaryActivity)
+    }
+
+    private fun windowVariance(): Double {
+        val mean = recentMagnitudes.average()
+        return recentMagnitudes.sumOf { (it - mean) * (it - mean) } / recentMagnitudes.size
     }
 }

@@ -1,6 +1,7 @@
 package ph.appbuilders.bantay_app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -18,10 +19,17 @@ class GuardianRuntimeTest {
     private val sent = mutableListOf<Triple<String, String, String>>()
     private val emitted = mutableListOf<GuardianState>()
     private val store = MemoryIncidentStore()
+    private class FakeLocationSource : EmergencyLocationSource {
+        var callback: ((EmergencyLocation?) -> Unit)? = null
+        var recent: EmergencyLocation? = null
+        override fun requestCurrent(onLocation: (EmergencyLocation?) -> Unit) { callback = onLocation }
+        override fun recentLocation(): EmergencyLocation? = recent
+    }
 
     private fun runtime(
         sendResult: String = "sent",
         countdownMs: Long = GuardianStateMachine.COUNTDOWN_MS,
+        locationSource: EmergencyLocationSource? = null,
     ) = GuardianRuntime(
         store = store,
         sendSms = { id, number, text ->
@@ -33,6 +41,7 @@ class GuardianRuntimeTest {
         zoneOffsetMs = { 0L },
         elapsedRealtimeMs = { 1_000L },
         countdownMs = countdownMs,
+        locationSource = locationSource,
     ).also { it.arm("Maria Santos", "+639991234567") }
 
     private fun impact(
@@ -73,6 +82,38 @@ class GuardianRuntimeTest {
         assertEquals(state_id_of(guardian), id)
         assertTrue(text.startsWith("BANTAY ALERT:"))
         assertTrue(text.contains("7.2g"))
+    }
+
+    @Test
+    fun freshFixDuringCountdownAppearsInSmsWithoutMovingDeadline() {
+        val source = FakeLocationSource()
+        val guardian = runtime(locationSource = source)
+        val state = guardian.beginFromImpact(impact())
+        assertEquals(25_000L, state.deadlineEpochMs)
+
+        clock = 20_000L
+        source.callback!!(EmergencyLocation(14.6, 121.0, 20_000L, 20f))
+        clock = 25_000L
+        guardian.tick()
+
+        assertEquals(1, sent.size)
+        assertTrue(sent.single().third.contains("GPS: 14.60000,121.00000"))
+        assertFalse(sent.single().third.contains("maps.google.com"))
+        assertEquals(25_000L, state.deadlineEpochMs)
+    }
+
+    @Test
+    fun fixArrivingAtDeadlineIsRejectedAndFallbackSmsStillSends() {
+        val source = FakeLocationSource()
+        val guardian = runtime(locationSource = source)
+        val state = guardian.beginFromImpact(impact())
+        clock = state.deadlineEpochMs!!
+        source.callback!!(EmergencyLocation(14.6, 121.0, clock, 20f))
+        guardian.tick()
+
+        assertEquals(1, sent.size)
+        assertTrue(sent.single().third.contains("GPS unavailable."))
+        assertTrue(!sent.single().third.contains("maps.google.com"))
     }
 
     private fun state_id_of(guardian: GuardianRuntime) = guardian.snapshot().incidentId!!
@@ -140,7 +181,10 @@ class GuardianRuntimeTest {
         // After it has left the device, late model output must never rewrite it.
         guardian.sendNow(state.incidentId!!)
         guardian.setIncidentText(state.incidentId!!, "too late")
-        assertEquals("BANTAY ALERT: custom wording", guardian.snapshot().text)
+        assertEquals(
+            "BANTAY ALERT: custom wording GPS unavailable.",
+            guardian.snapshot().text,
+        )
     }
 
     @Test
@@ -165,12 +209,17 @@ class GuardianRuntimeTest {
 
     @Test
     fun manualSosSendsWithoutAnyImpact() {
-        val guardian = runtime()
+        val source = FakeLocationSource().apply {
+            recent = EmergencyLocation(14.6, 121.0, clock, 20f)
+        }
+        val guardian = runtime(locationSource = source)
 
         guardian.startManualSos()
 
         assertEquals(1, sent.size)
         assertTrue(sent.single().third.contains("I need help"))
+        assertTrue(sent.single().third.contains("GPS: 14.60000,121.00000"))
+        assertFalse(sent.single().third.contains("maps.google.com"))
     }
 
     @Test

@@ -1,6 +1,6 @@
 # Bantay Path 2: on-device alert text
 
-Importable Flutter module for the optional LiteRT-LM path. Path 1 owns impact detection, countdown, and sending. Path 2 returns a short alert if Qwen finishes and passes fact checks; otherwise it returns the fixed English or Tagalog alert.
+Importable Flutter module for the optional LiteRT-LM path. Path 1 owns impact detection, countdown, and sending. In the product app, Qwen composes wording asynchronously during the confirmed-fall countdown; native Path 1 uses it only if it passes fact checks and arrives before the unchanged deadline. Otherwise native sends its fixed English or Tagalog alert.
 
 ## Host app setup
 
@@ -57,7 +57,7 @@ await incidentStore.recordLlmUsed(alert.llmUsed);
 
 The host app supplies `startCountdown`, `alertAlreadySent`, `smsSender`, and `incidentStore`. `AlertResult.llmUsed` maps to the `incidents.llm_used` field in `docs/architecture.md`. Preserve the exact `alert.text` in the SMS outbox and Alert Sent screen. Do not wait for `compose` when the user presses SEND HELP.
 
-The composer enforces a 2-second wall-clock limit, asks the native session to stop on timeout, limits model output to 40 tokens, and rejects empty, long, or numerically inconsistent text. This is a format and numeric check, not a full semantic proof; review actual model wording on the demo phone. Rejected text never reaches SMS. The template is complete when no model is installed.
+The harness keeps a 2-second wall-clock limit. The product coordinator supplies the remaining countdown time minus a 500 ms bridge reserve. Both ask the native session to stop on timeout, limit output to 32 tokens, and reject empty, long, or numerically inconsistent text. This is a format and numeric check, not a full semantic proof; review actual model wording on the demo phone. Only accepted model wording is offered to native Path 1. The fixed alert remains complete when no model is installed or generation is late.
 
 ## Measured on the demo phone
 
@@ -103,21 +103,15 @@ unreliably produces complete, correct facts. That is precisely the failure mode
 docs/SPEC.md §7 describes, and it is why the composer keeps a hard numeric check
 rather than trusting the output.
 
-### Recommendation
+### Current product integration
 
-Per docs/SPEC.md's Hour-16 gate, present Path 1 as the product and keep the template
-as the shipped alert. Path 2 is working code with a correct fallback, not a
-blocker. Two changes would make live wording viable, both outside Path 2's
-2-second contract:
-
-1. Move generation into the countdown window instead of the send path. The
-   countdown runs for several seconds; prefill during it, send whatever is
-   ready. This needs a Path 1 change, not a Path 2 change.
-2. Shorten the prompt. The instruction block is ~330 characters of the 508.
-   Moving static instructions into a system role, or trimming them, cuts prefill
-   proportionally.
-
-Do not spend the remaining demo time tuning prompt wording. Measure, then decide.
+The product now composes wording during the native 15-second countdown using a
+shorter prompt and a deadline-aware timeout. Native Kotlin appends any current
+GPS fix and remains the final gate for incident ID and deadline. Model load was
+observed on the SM-A127F at 11.4 seconds on GPU on 2026-10-10. A padded-drop
+check must still establish that generation passes the grounding checks and is
+accepted by native Path 1 before the deadline. Do not treat model readiness or
+the older diagnostic output as proof of production `llmUsed: true`.
 
 ## Verification on a different phone
 

@@ -23,6 +23,13 @@ object SmsGateway {
     private var store: SmsOutboxDb? = null
     private val main = Handler(Looper.getMainLooper())
     private val scheduledReconciles = mutableSetOf<String>()
+
+    internal fun errorForResultCode(resultCode: Int): String = smsErrorForResultCode(
+        resultCode,
+        SmsManager.RESULT_ERROR_RADIO_OFF,
+        SmsManager.RESULT_ERROR_NO_SERVICE,
+        SmsManager.RESULT_NETWORK_ERROR,
+    )
     private fun database(context: Context): SmsOutboxDb =
         store ?: SmsOutboxDb(context.applicationContext).also { store = it }
 
@@ -155,11 +162,7 @@ object SmsGateway {
             ACTION_SENT -> if (resultCode == Activity.RESULT_OK) {
                 SmsOutboxState.sentPart(current, part)
             } else {
-                val error = when (resultCode) {
-                    SmsManager.RESULT_ERROR_RADIO_OFF -> "radio_off"
-                    SmsManager.RESULT_ERROR_NO_SERVICE -> "no_service"
-                    else -> "sms_error_$resultCode"
-                }
+                val error = errorForResultCode(resultCode)
                 SmsOutboxState.failedPart(current, part, error)
             }
             ACTION_DELIVERED -> if (resultCode == Activity.RESULT_OK) {

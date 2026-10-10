@@ -27,15 +27,21 @@ Bantay splits fall handling into two independent paths.
 
 | | Path 1 (safety-critical) | Path 2 (optional) |
 |---|---|---|
-| **What** | Threshold cascade on accelerometer features: alarm, countdown, haptics, SMS | On-device LLM rewrites the alert's wording |
+| **What** | Native fall detection, countdown, haptics, SMS, optional emergency location, local incident history | On-device LLM proposes alert wording |
 | **Depends on** | Nothing | Qwen3-0.6B via LiteRT-LM |
 | **Budget** | Under 100 ms to alarm | 40 tokens, 2 s wall-clock |
 | **On failure** | n/a | Hardcoded bilingual template, unedited |
 
-Path 1 is the product. Path 2 enriches the message and never gates it: the
-countdown starts the moment the detector fires, and `compose` computes the
-template first and returns it on any model failure, timeout, or fact-check
-rejection.
+Path 1 is the product. A confirmed fall starts its fixed 15-second countdown
+and SMS flow. GPS lookup is optional and time-bounded; without a usable fix,
+the message says `Location unavailable`. Manual SOS does not wait for GPS.
+Incident records and their actual SMS/countdown outcomes stay in an app-private
+SQLite database, with local search, filters, and detail views.
+
+Path 2 can propose shorter wording while the countdown runs. Native Path 1 keeps
+its fixed message ready and accepts a model candidate only when it arrives
+before the existing deadline and passes validation. Model failure or a late
+candidate never delays SMS.
 
 The rule that governs every change here: **a life-saving path should never
 wait on a generative model.**
@@ -45,7 +51,7 @@ wait on a generative model.**
 | Path | What |
 |---|---|
 | `bantay_llm/` | Dart-only Path 2 module. No platform code. |
-| `bantay_app/` | Flutter harness exercising both paths on a phone, live sensor stream included. Not the product shell. |
+| `bantay_app/` | Flutter app and Kotlin Path 1 runtime: fall flow, SMS, optional GPS, local history, and Path 2 integration. |
 | `models/` | `.litertlm` files and device caches. Gitignored. |
 | `docs/SPEC.md` | Authoritative spec: problem, detector math, prompt, gates, risks. |
 | `docs/architecture.md` | Module map, threading, state machine, data model, failure modes. |
@@ -120,11 +126,26 @@ cd bantay_app  && $FLUTTER test && $FLUTTER analyze
 
 ## Status
 
-Verified on the demo phone:
+Implemented in the current source:
 
-- Path 1 sensor pipeline end to end: 41-50 Hz measured, 19-20 Hz cadence,
-  carpet drop at 11.09 g against the 3.5 g cascade threshold, 65 s screen-off
-  with sampling intact, cold attach re-draining with honest dropped counts.
+- Native impact cascade and fixed countdown, with manual SOS and SMS outcomes
+  recorded in the local incident history.
+- Optional emergency coordinates: a fresh fix is requested during a fall
+  countdown; SOS uses only a sufficiently recent last-known fix. Neither path
+  waits indefinitely for location.
+- Local movement baseline refines the movement label attached to an event. It
+  does not change the fall trigger or impact, rotation, and stillness gates.
+- History and incident details show real saved records and SMS/countdown
+  outcomes. No demo incidents are seeded, and no cloud sync is used.
+- The optional local model runs alongside the native countdown. Kotlin checks
+  the incident identity and deadline before using generated wording; the
+  fallback text remains available.
+
+Previously verified on the demo phone:
+
+- Accelerometer pipeline end to end: 41-50 Hz measured, 19-20 Hz cadence,
+  65 s screen-off with sampling intact, cold attach re-draining with honest
+  dropped counts. These measurements predate the current 5.0 g impact gate.
 - Path 2: the documented model loads and generates on the phone on both CPU
   and GPU backends; the GPU OpenCL accelerator cuts prefill 2.6x.
 - Path 2's 2-second budget is **not** reachable on this hardware. Prefill
@@ -132,9 +153,11 @@ Verified on the demo phone:
   production path correctly selects the bilingual template. `llmUsed` is
   false, the SMS text is complete, and the alert never waits.
 
-Not built yet: the detector itself (slice 2), the SMS outbox in the product
-shell, and the six product screens. See `docs/path1-module.md` for the slice
-plan.
+The new detector, GPS, SMS, model-coordination, and history flows still need
+fresh end-to-end device verification. Earlier carpet-drop measurements used a
+3.5 g impact gate and do not validate the current 5.0 g threshold. See
+`docs/path1-module.md` and `docs/ui-flow.md` for implementation details and the
+current device checklist.
 
 Passing `flutter test` is not evidence the model loads or generates on the
 phone. Device claims here come from `screencap` and logcat, not from the test

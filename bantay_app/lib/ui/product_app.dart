@@ -4,9 +4,12 @@ import 'dart:math' as math;
 
 import 'package:bantay_app/alerts/alert_gateway.dart';
 import 'package:bantay_app/alerts/contact_store.dart';
+import 'package:bantay_app/alerts/incident_history.dart';
 import 'package:bantay_app/sensor_payload.dart';
 import 'package:bantay_app/sensors/sensor_bridge.dart';
 import 'package:bantay_app/alerts/native_incident_gateway.dart';
+import 'package:bantay_app/alerts/local_model_alert_coordinator.dart';
+import 'package:bantay_app/ui/history_screens.dart';
 import 'package:bantay_llm/bantay_llm.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
@@ -16,15 +19,21 @@ const _green = Color(0xFF185C43);
 const _red = Color(0xFFC52222);
 const _canvas = Color(0xFFF5F7FA);
 const _paleBlue = Color(0xFFE2EFFD);
+const _diagnosticDisarmed = bool.fromEnvironment('BANTAY_DIAGNOSTIC_DISARM');
 
-enum _Page { loading, setup, calibrating, guardian, incident, result }
+enum _Page {
+  loading,
+  setup,
+  calibrating,
+  guardian,
+  incident,
+  result,
+  history,
+  incidentDetails,
+}
 
 class ProductApp extends StatelessWidget {
-  const ProductApp({
-    super.key,
-    this.contactStore,
-    this.testSetupOnly = false,
-  });
+  const ProductApp({super.key, this.contactStore, this.testSetupOnly = false});
   final ContactStore? contactStore;
   final bool testSetupOnly;
   @override
@@ -66,10 +75,7 @@ class ProductApp extends StatelessWidget {
 }
 
 class _ProductHome extends StatefulWidget {
-  const _ProductHome({
-    this.contactStore,
-    required this.testSetupOnly,
-  });
+  const _ProductHome({this.contactStore, required this.testSetupOnly});
   final ContactStore? contactStore;
   final bool testSetupOnly;
   @override
@@ -81,8 +87,24 @@ class _ProductHomeState extends State<_ProductHome> {
   final NativeIncidentGateway _gateway = NativeIncidentGateway();
   late final ContactStore _contacts = widget.contactStore ?? ContactStore();
   final BantayPath2 _path2 = BantayPath2();
+  late final LocalModelAlertCoordinator _modelAlerts =
+      LocalModelAlertCoordinator(
+        compose:
+            (facts, language, {required timeout, required includeLocation}) =>
+                _path2.compose(
+                  facts,
+                  language,
+                  timeout: timeout,
+                  includeLocation: includeLocation,
+                ),
+        submit: _gateway.setIncidentText,
+        now: DateTime.now,
+        languageCode: () =>
+            WidgetsBinding.instance.platformDispatcher.locale.languageCode,
+      );
   final TextEditingController _name = TextEditingController();
   final TextEditingController _number = TextEditingController();
+  final TextEditingController _historySearch = TextEditingController();
   StreamSubscription<AccelBatch>? _batchSub;
   StreamSubscription<SensorStatus>? _stateSub;
   StreamSubscription<SmsSubmission>? _smsStatusSub;
@@ -103,6 +125,11 @@ class _ProductHomeState extends State<_ProductHome> {
   final List<double> _magnitudes = [];
   final RateTracker _rate = RateTracker();
   DateTime? _lastIncidentAt;
+  List<IncidentHistoryRecord> _historyRecords = const [];
+  String? _historyError;
+  String? _selectedIncidentId;
+  IncidentHistoryFilter _historyFilter = IncidentHistoryFilter.all;
+  bool _settingsOpenedFromActive = false;
 
   /// Native incident state. The service is the single source of truth: it
   /// detects, counts down, and sends. This screen only renders what the
@@ -148,9 +175,11 @@ class _ProductHomeState extends State<_ProductHome> {
       _smsStatusSub = _gateway.states.listen((status) {
         if (!mounted) return;
         setState(() => _latestSms = status);
+        unawaited(_refreshHistory());
       });
       final prior = await _gateway.outboxSnapshot();
       if (prior.isNotEmpty) _latestSms = prior.first;
+      await _refreshHistory();
       final snapshot = await _gateway.snapshot();
       if (snapshot != null) _native = snapshot;
       await _sensors.attach();
@@ -158,13 +187,27 @@ class _ProductHomeState extends State<_ProductHome> {
       // this widget being disposed.
       if (_contact != null && _contact!.calibrated == true) {
         if (await _gateway.smsPermissionStatus()) {
-          await _gateway.arm(
-            contactName: _contact!.name,
-            number: _contact!.normalizedNumber,
-          );
+          if (_diagnosticDisarmed) {
+            if (snapshot?.counting == true && snapshot?.incidentId != null) {
+              await _gateway.cancel(snapshot!.incidentId!);
+            }
+            await _gateway.disarm();
+          } else {
+            await _gateway.arm(
+              contactName: _contact!.name,
+              number: _contact!.normalizedNumber,
+            );
+          }
           await _sensors.start();
           final restored = await _gateway.snapshot();
-          if (restored != null) _native = restored;
+          if (restored != null) {
+            _native = restored;
+            if (restored.counting && _contact != null) {
+              unawaited(
+                _modelAlerts.onIncident(restored, contactName: _contact!.name),
+              );
+            }
+          }
           if (mounted) {
             setState(() {
               _page = restored?.counting == true
@@ -174,7 +217,7 @@ class _ProductHomeState extends State<_ProductHome> {
                         : _Page.guardian);
             });
           }
-          unawaited(_prepareModel());
+          if (!_diagnosticDisarmed) unawaited(_prepareModel());
         } else {
           if (mounted) setState(() => _page = _Page.setup);
         }
@@ -195,9 +238,17 @@ class _ProductHomeState extends State<_ProductHome> {
     try {
       final dir = await getApplicationDocumentsDirectory();
       final file = File('${dir.path}/Qwen3-0.6B_dynamic_wi4b32_afp32.litertlm');
-      if (!await file.exists()) return;
-      await _path2.prepareFromFile(file.path, backend: PreferredBackend.gpu);
-    } catch (_) {
+      if (!await file.exists()) {
+        debugPrint('Bantay.Path2: local model file missing; using fixed alert');
+        return;
+      }
+      final ready = await _path2.prepareFromFile(
+        file.path,
+        backend: PreferredBackend.gpu,
+      );
+      debugPrint('Bantay.Path2: modelReady=$ready backend=gpu');
+    } catch (error) {
+      debugPrint('Bantay.Path2: model preparation failed: $error');
       // Path 1 already has its fixed alert.
     }
   }
@@ -223,6 +274,10 @@ class _ProductHomeState extends State<_ProductHome> {
   /// The service reports an incident; the UI follows it. */
   void _onNativeIncident(NativeIncidentSnapshot snapshot) {
     if (!mounted) return;
+    final contact = _contact;
+    if (contact != null && snapshot.counting) {
+      unawaited(_modelAlerts.onIncident(snapshot, contactName: contact.name));
+    }
     setState(() {
       _native = snapshot;
       if (snapshot.counting) {
@@ -231,13 +286,57 @@ class _ProductHomeState extends State<_ProductHome> {
         _startCountdownRepaint();
       } else if (snapshot.stage == NativeIncidentStage.canceled) {
         _countdownRepaintTimer?.cancel();
-        _page = _Page.guardian;
+        if (_page == _Page.incident) _page = _Page.guardian;
       } else if (_isTerminal(snapshot.stage)) {
         _countdownRepaintTimer?.cancel();
-        _page = _Page.result;
+        if (_page == _Page.incident || _page == _Page.guardian) {
+          _page = _Page.result;
+        }
       }
     });
+    unawaited(_refreshHistory());
   }
+
+  Future<void> _refreshHistory() async {
+    try {
+      final records = await _gateway.historySnapshot();
+      if (!mounted) return;
+      setState(() {
+        _historyRecords = records;
+        _historyError = null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _historyError = 'Incident history could not be loaded.');
+    }
+  }
+
+  void _openHistory() {
+    unawaited(_refreshHistory());
+    setState(() => _page = _Page.history);
+  }
+
+  void _openIncidentDetails(IncidentHistoryRecord record) => setState(() {
+    _selectedIncidentId = record.incidentId;
+    _page = _Page.incidentDetails;
+  });
+
+  void _backToHistory() => setState(() => _page = _Page.history);
+
+  Future<void> _refreshAndBackToHistory() async {
+    await _refreshHistory();
+    if (mounted) _backToHistory();
+  }
+
+  void _openSetup() => setState(() {
+    _settingsOpenedFromActive = true;
+    _page = _Page.setup;
+  });
+
+  void _returnToGuardian() => setState(() {
+    _settingsOpenedFromActive = false;
+    _page = _Page.guardian;
+  });
 
   void _startCountdownRepaint() {
     _countdownRepaintTimer?.cancel();
@@ -299,6 +398,12 @@ class _ProductHomeState extends State<_ProductHome> {
         );
         return;
       }
+      // Optional permission: emergency SMS still proceeds without a fix.
+      try {
+        await _gateway.requestLocationPermission();
+      } catch (_) {
+        // Optional permission failure must never block Guardian activation.
+      }
       _contact = EmergencyContact(name: name, number: number);
       _calibrationSamples = 0;
       _calibrationSeconds = 0;
@@ -341,7 +446,12 @@ class _ProductHomeState extends State<_ProductHome> {
       );
       final snapshot = await _gateway.snapshot();
       if (snapshot != null) _native = snapshot;
-      if (mounted) setState(() => _page = _Page.guardian);
+      if (mounted) {
+        setState(() {
+          _settingsOpenedFromActive = false;
+          _page = _Page.guardian;
+        });
+      }
       unawaited(_prepareModel());
     } catch (error) {
       if (mounted) {
@@ -367,6 +477,7 @@ class _ProductHomeState extends State<_ProductHome> {
     _gateway.dispose();
     _name.dispose();
     _number.dispose();
+    _historySearch.dispose();
     super.dispose();
   }
 
@@ -379,19 +490,30 @@ class _ProductHomeState extends State<_ProductHome> {
       _Page.guardian => _buildGuardian(),
       _Page.incident => _buildIncident(),
       _Page.result => _buildResult(),
+      _Page.history => _buildHistory(),
+      _Page.incidentDetails => _buildIncidentDetails(),
     };
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 72,
+        leading: _page == _Page.setup && _settingsOpenedFromActive
+            ? IconButton(
+                tooltip: 'Back to Guardian',
+                onPressed: _returnToGuardian,
+                icon: const Icon(Icons.arrow_back_rounded),
+              )
+            : null,
         title: Image.asset(
           'assets/logo.png',
           height: 48,
           alignment: Alignment.centerLeft,
         ),
         actions: [
-          if (_page == _Page.guardian)
+          if (_page == _Page.guardian ||
+              _page == _Page.history ||
+              _page == _Page.incidentDetails) ...[
             Padding(
-              padding: const EdgeInsets.only(right: 20),
+              padding: const EdgeInsets.only(right: 2),
               child: Center(
                 child: _pill(
                   _sensorRunning ? '◉ Live' : 'Offline',
@@ -402,10 +524,102 @@ class _ProductHomeState extends State<_ProductHome> {
                 ),
               ),
             ),
+            IconButton(
+              tooltip: 'Settings',
+              onPressed: _openSetup,
+              icon: const Icon(Icons.settings_outlined, color: _blue),
+            ),
+            const SizedBox(width: 8),
+          ],
         ],
       ),
       body: SafeArea(child: child),
+      bottomNavigationBar:
+          _page == _Page.guardian ||
+              _page == _Page.history ||
+              _page == _Page.incidentDetails
+          ? NavigationBar(
+              selectedIndex: _page == _Page.guardian ? 0 : 1,
+              onDestinationSelected: (index) {
+                if (index == 0) {
+                  _returnToGuardian();
+                } else {
+                  _openHistory();
+                }
+              },
+              destinations: const [
+                NavigationDestination(
+                  icon: Icon(Icons.shield_outlined),
+                  selectedIcon: Icon(Icons.shield),
+                  label: 'Guardian',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.history_rounded),
+                  label: 'History',
+                ),
+              ],
+            )
+          : null,
     );
+  }
+
+  Widget _buildHistory() {
+    if (_historyError != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.error_outline, color: _red, size: 36),
+              const SizedBox(height: 12),
+              Text(_historyError!, textAlign: TextAlign.center),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () => unawaited(_refreshHistory()),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Try again'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return IncidentHistoryScreen(
+      records: _historyRecords,
+      searchController: _historySearch,
+      filter: _historyFilter,
+      onSearchChanged: (_) => setState(() {}),
+      onFilterChanged: (filter) => setState(() => _historyFilter = filter),
+      onOpenIncident: _openIncidentDetails,
+    );
+  }
+
+  Widget _buildIncidentDetails() {
+    final selectedId = _selectedIncidentId;
+    IncidentHistoryRecord? record;
+    for (final item in _historyRecords) {
+      if (item.incidentId == selectedId) {
+        record = item;
+        break;
+      }
+    }
+    if (record == null) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Incident record unavailable'),
+            TextButton.icon(
+              onPressed: () => unawaited(_refreshAndBackToHistory()),
+              icon: const Icon(Icons.arrow_back_rounded),
+              label: const Text('Back to Incident History'),
+            ),
+          ],
+        ),
+      );
+    }
+    return IncidentDetailsScreen(record: record, onBack: _backToHistory);
   }
 
   Widget _buildSetup() => ListView(
@@ -480,7 +694,9 @@ class _ProductHomeState extends State<_ProductHome> {
           style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold),
         ),
         const SizedBox(height: 8),
-        const Text('Grant SMS permission and start monitoring.'),
+        const Text(
+          'Grant SMS permission and start monitoring. Allow location to include coordinates in alerts; if declined, SMS still sends without coordinates.',
+        ),
       ]),
       if (_error != null) ...[
         const SizedBox(height: 14),
@@ -580,7 +796,11 @@ class _ProductHomeState extends State<_ProductHome> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    _sensorRunning ? 'Guardian Active' : 'Guardian Offline',
+                    _sensorRunning
+                        ? (_diagnosticDisarmed
+                              ? 'Diagnostics Only'
+                              : 'Guardian Active')
+                        : 'Guardian Offline',
                     style: const TextStyle(
                       fontSize: 20,
                       color: _green,
@@ -590,7 +810,9 @@ class _ProductHomeState extends State<_ProductHome> {
                   const SizedBox(height: 6),
                   Text(
                     _sensorRunning
-                        ? 'Bantay is monitoring your movement and watching for unusual impacts.'
+                        ? (_diagnosticDisarmed
+                              ? 'Sensors are active; SMS alerts are disarmed for testing.'
+                              : 'Bantay is monitoring your movement and watching for unusual impacts.')
                         : 'Sensor monitoring stopped. Restart the app or check permissions.',
                   ),
                 ],
@@ -788,10 +1010,10 @@ class _ProductHomeState extends State<_ProductHome> {
           Text(
             'Impact strength: ${_native?.peakG?.toStringAsFixed(1) ?? 'unavailable'} g',
           ),
+          Text('Limited movement: ${_native?.stillnessSeconds ?? 0} seconds'),
           Text(
-            'Limited movement: ${_native?.stillnessSeconds ?? 0} seconds',
+            'Detected at: ${_native?.occurredAt?.toLocal() ?? 'unavailable'}',
           ),
-          Text('Detected at: ${_native?.occurredAt?.toLocal() ?? 'unavailable'}'),
         ]),
       if (!_manual) const SizedBox(height: 18),
       _sectionCard([
@@ -823,17 +1045,20 @@ class _ProductHomeState extends State<_ProductHome> {
   Widget _buildResult() {
     final stage = _native?.stage ?? NativeIncidentStage.sending;
     final title = switch (stage) {
-      NativeIncidentStage.sent || NativeIncidentStage.delivered => 'Emergency Alert Sent',
+      NativeIncidentStage.sent ||
+      NativeIncidentStage.delivered => 'Emergency Alert Sent',
       NativeIncidentStage.queued => 'Emergency Alert Queued',
-      NativeIncidentStage.failed || NativeIncidentStage.unknown => 'Emergency Alert Failed',
+      NativeIncidentStage.failed ||
+      NativeIncidentStage.unknown => 'Emergency Alert Failed',
       _ => 'Sending Emergency Alert',
     };
     final detail = switch (stage) {
       NativeIncidentStage.sent => 'Carrier accepted the SMS.',
       NativeIncidentStage.delivered => 'Carrier reports SMS delivered.',
-      NativeIncidentStage.queued => _native?.error ?? 'SMS queued for retry when service is available.',
-      NativeIncidentStage.failed || NativeIncidentStage.unknown =>
-        _native?.error ?? 'The SMS outcome needs checking before retry.',
+      NativeIncidentStage.queued =>
+        _native?.error ?? 'SMS queued for retry when service is available.',
+      NativeIncidentStage.failed ||
+      NativeIncidentStage.unknown => _smsFailureDetail(_native?.error),
       _ => 'Waiting for the carrier response.',
     };
     return ListView(
@@ -842,14 +1067,21 @@ class _ProductHomeState extends State<_ProductHome> {
         Center(
           child: CircleAvatar(
             radius: 46,
-            backgroundColor: stage == NativeIncidentStage.failed || stage == NativeIncidentStage.unknown
+            backgroundColor:
+                stage == NativeIncidentStage.failed ||
+                    stage == NativeIncidentStage.unknown
                 ? const Color(0xFFFFE5E5)
                 : const Color(0xFFD5F0E0),
             child: Icon(
-              stage == NativeIncidentStage.failed || stage == NativeIncidentStage.unknown
+              stage == NativeIncidentStage.failed ||
+                      stage == NativeIncidentStage.unknown
                   ? Icons.error_outline
                   : Icons.mark_email_read_outlined,
-              color: stage == NativeIncidentStage.failed || stage == NativeIncidentStage.unknown ? _red : _green,
+              color:
+                  stage == NativeIncidentStage.failed ||
+                      stage == NativeIncidentStage.unknown
+                  ? _red
+                  : _green,
               size: 48,
             ),
           ),
@@ -898,6 +1130,17 @@ class _ProductHomeState extends State<_ProductHome> {
       ],
     );
   }
+
+  String _smsFailureDetail(String? error) => switch (error) {
+    'network_error' => 'The mobile network reported that this SMS failed. Check with your contact before trying again.',
+    'no_service' => 'There was no mobile service. Check signal and SMS status before trying again.',
+    'radio_off' => 'The phone radio was off. Check signal and SMS status before trying again.',
+    'sms_permission_required' =>
+      'SMS permission is required to send the alert.',
+    'no_default_sms_sim' => 'No default SIM is available for sending SMS.',
+    'sms_not_supported' => 'This device cannot send SMS.',
+    _ => 'The SMS outcome needs checking before retry.',
+  };
 
   Widget _sectionCard(List<Widget> children) => Card(
     child: Padding(

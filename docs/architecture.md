@@ -37,7 +37,7 @@ gyroscope → accelerometer-only detection.
 | `FallWatchService` | Kotlin | B | Foreground service, `SensorManager` listener, ring buffer |
 | `SensorChannel` | Kotlin | B | `MethodChannel`, batches events at 20Hz to Dart |
 | `FeatureExtractor` | Dart | A | Gravity LPF, windowing, 24-feature vector |
-| `BaselineModel` | Dart | A/C | Rolling walking signature, adaptive thresholds |
+| `MovementBaseline` | Kotlin | Path 1 | Local variability profile for pre-impact activity labels; fixed fall gates |
 | `ThresholdDetector` | Dart | A | Path 1 cascade, emits `ImpactEvent` |
 | `MlpDetector` | Dart | C | Path 1b, loads JSON weights, pure-Dart forward pass |
 | `AlertComposer` | Dart | A | Fills LLM prompt, owns the hardcoded fallback |
@@ -99,7 +99,7 @@ ARMED ──── baseline invalid ──▶ CALIBRATING
   │                                    │ 20s of walking captured
   │                                    ▼
   │                                 ARMED
-  │  cascade condition 1 (peak g > 3.5)
+  │  cascade condition 1 (peak g > 5.0)
   ▼
 PRECURSOR ──── condition 2 fails ──▶ back to ARMED (rejected)
   │ condition 2 (Δorientation > 60°)
@@ -136,7 +136,7 @@ Ordered cheapest-first, so a typical shake never reaches the orientation math.
 
 | # | Condition | Threshold | Rationale |
 |---|-----------|-----------|-----------|
-| 1 | Vector magnitude peak | > 3.5 g | Free-fall then impact. Below this is a bump |
+| 1 | Vector magnitude peak | > 5.0 g | Impact gate; lower-force falls may be missed |
 | 2 | Low-passed gravity orientation delta | > 60° | Device rotated during impact |
 | 3 | Post-impact stillness | ≥ 2s, < 0.15 g variance | Falls end in stillness. Drops bounce |
 | 4 | Test/calibration flag window | 8s suppression | Don't page someone during a demo tap |
@@ -171,20 +171,18 @@ better on the held-out set.
 
 ---
 
-## 7. Adaptive baseline (the personalization layer)
+## 7. Local movement profile
 
-The concept: thresholds relative to *your* gait, not a population average.
-Scoped honestly — this is adaptive thresholds from a rolling signature, **not**
-on-device fine-tuning. The judge-facing argument is identical, and this version
-is buildable in 24 hours.
+The current implementation learns a private online profile from clean,
+low-magnitude, two-second windows of accelerometer-magnitude variability. It
+persists locally and refines only the `still` / `walking` / `running` context
+attached to an incident. Candidate impacts, high-magnitude samples, cooldowns,
+and a ten-second post-candidate guard are excluded.
 
-- Rolling 60s window of walking-state features
-- Derives per-user `g_thresh`, `Δorientation_thresh`, stillness duration
-- Anomalies below the user's own baseline raise sensitivity rather than firing
-
-Subtle and honest limitation: a real fall *is* an anomaly relative to baseline.
-The cascade catches gross deviations; the baseline tunes the margin. It does
-not predict injury. Say that if a judge asks.
+The profile does not alter the fixed 5.0 g impact, 60-degree rotation, or
+two-second stillness gates. It is statistical personalization, not LLM
+fine-tuning or model-directed detection. The Qwen model remains outside the
+sensor-time path and may only help with alert wording during the countdown.
 
 ---
 

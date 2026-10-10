@@ -59,8 +59,11 @@ Two independent paths, on purpose.
 **Path 1 — safety-critical.** Threshold cascade → alarm, countdown, haptic.
 Target < 100ms. Depends on **nothing**.
 
-**Path 2 — intelligence.** LiteRT-LM (Qwen3-0.6B) → incident narrative →
-alert text. Capped 40 tokens, 2s timeout. Degrades to a hardcoded template.
+**Path 2 — intelligence.** LiteRT-LM (Qwen3-0.6B) → short grounded alert
+wording. Capped at 32 output tokens. In the product app it runs asynchronously
+during Path 1's 15-second countdown, with a timeout based on the remaining
+time minus a 500 ms bridge reserve. It never extends the deadline. The fixed
+alert remains ready if the model is unavailable, late, or rejected.
 
 > A life-saving path should never wait on a generative model.
 
@@ -73,7 +76,7 @@ Kotlin FallWatchService (foreground, type=health)
         v
 Dart isolate (never the UI isolate)
   Feature extraction (gravity LPF + per-window stats -> 24 features)
-  Adaptive baseline (rolling 60s walking signature, thresholds = f(you))
+  Local movement profile for activity context; fixed fall thresholds
         |
         +--> PATH 1  threshold cascade  -> alarm immediately, < 100ms
         |
@@ -174,7 +177,7 @@ duration.
 
 ### Path 1 — threshold cascade (guaranteed, ship first)
 
-1. magnitude peak > 3.5 g
+1. magnitude peak > 5.0 g
 2. AND within 500 ms, low-passed gravity estimate deviates > 60° from
    pre-impact orientation
 3. AND followed by ≥ 2 s stillness below 0.15 g variance
@@ -234,14 +237,26 @@ FACTS:
 MESSAGE:
 ```
 
+Location is requested automatically after a fall is confirmed, once the user
+has granted coarse or precise access during setup. A current fix may be used for
+30 seconds and the lookup ends after 10 seconds; neither operation extends the
+15-second SMS countdown. The SMS includes coordinates and accuracy when a fix
+is available; it omits map URLs. Otherwise, the alert still sends with
+`Location unavailable`. Manual SOS sends immediately and uses a cached fix only
+when it is no older than two minutes. Location permission is optional; SMS
+permission remains the only required alert permission.
+
 ### Hard rules
 
-- `maxTokens: 40`
-- 2-second wall-clock timeout
-- On timeout, failure, or empty output → send the hardcoded bilingual template,
-  unedited
-- The app must be fully functional with the LLM absent. That's a feature, and
-  it's what makes the demo safe.
+- Context window: `maxTokens: 2048`; generated output: at most 32 tokens.
+- The harness keeps a 2-second diagnostic composition budget. Production uses
+  the remaining native countdown time minus the 500 ms bridge reserve.
+- The model may change wording only. Native Path 1 owns incident confirmation,
+  cancellation, GPS, the fixed 15-second deadline, and SMS delivery.
+- Only grounded text with `llmUsed: true` is offered to native Path 1. Native
+  checks incident identity and deadline again. Otherwise send the fixed alert.
+- The app remains functional without the LLM. Model failure never blocks or
+  delays an emergency SMS.
 
 ---
 
@@ -259,8 +274,12 @@ MESSAGE:
 **Hour 2.** If LiteRT-LM didn't work → switch to `net.ladenthin:llama-android`
 **immediately**, not later. If that failed → template-only.
 
-**Hour 16.** If Path 2 isn't generating acceptable text → ship template-only and
-present Path 1 as the product. Do not debug prompts on demo eve.
+**Historical Hour-16 gate.** The original sprint gate selected template-only
+after Path 2 failed to meet its 2-second budget. That choice is superseded by
+the current countdown-window integration: the local model is attempted during
+the unchanged 15-second Path 1 countdown, while the fixed alert remains the
+fallback. On 2026-10-10 the SM-A127F loaded the checksummed Qwen model on GPU;
+the production `llmUsed: true` path still needs a padded-drop verification.
 
 ---
 
@@ -409,10 +428,9 @@ implementation started. No `pubspec.yaml`, no `AndroidManifest.xml`, no
 
 ### Rejected strategic framing
 
-Lane C ("it learns you, privately") was folded into Lane A as the adaptive
-baseline rather than built standalone. Its argument was the sharpest available,
-but on-device fine-tuning of a language model is not a 24-hour build. Folding
-it in preserves the argument and drops only the unbuildable part.
+Lane C's local-learning claim is implemented as an on-device variability
+profile that personalizes activity context. It does not fine-tune Qwen or change
+safety thresholds; the language model remains outside sensor-time detection.
 
 ### Docs produced this session
 

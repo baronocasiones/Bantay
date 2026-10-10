@@ -54,13 +54,18 @@ class GuardianRuntime(
     private val zoneOffsetMs: () -> Long = { java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()).toLong() },
     private val elapsedRealtimeMs: () -> Long = android.os.SystemClock::elapsedRealtime,
     private val countdownMs: Long = GuardianStateMachine.COUNTDOWN_MS,
+    private val locationSource: EmergencyLocationSource? = null,
+    movementBaseline: MovementBaseline = MovementBaseline(),
+    private val journal: IncidentJournal = NoOpIncidentJournal,
 ) {
-    private val detector = CascadeDetector()
+    private val detector = CascadeDetector(movementBaseline)
     private val lock = Any()
     private var state: GuardianState = store.load() ?: GuardianState()
 
     /** Guards [maybeAutoSend] so a retry cannot race a manual SEND HELP. */
     private val sending = AtomicBoolean(false)
+    private var locationIncidentId: String? = null
+    private var incidentLocation: EmergencyLocation? = null
 
     /** Diagnostics are debug-only and never gate an alert. */
     val diagnostics: DetectorDiagnostics get() = detector.diagnostics
@@ -88,34 +93,43 @@ class GuardianRuntime(
         if (state.incidentId != incidentId || state.stage != "counting") return false
         if (now() >= (state.deadlineEpochMs ?: 0L)) return false
         if (text.isBlank() || text.length > 320 || text.any { it == '\n' || it == '\r' }) return false
-        commit(state.copy(text = text))
+        commit(state.copy(text = text), updateHistory = true)
         true
     }
 
     fun cancel(incidentId: String): GuardianState = synchronized(lock) {
-        commit(GuardianStateMachine.cancel(state, incidentId))
+        val next = GuardianStateMachine.cancel(state, incidentId)
+        commit(next, eventLabel = if (next.stage == "canceled" && state.stage != "canceled") {
+            "Countdown cancelled"
+        } else null)
         state
     }
 
     /** User pressed SEND HELP, or the deadline expired. Sends once. */
     fun sendNow(incidentId: String): GuardianState = synchronized(lock) {
-        beginSend(incidentId)
+        beginSend(incidentId, "Send requested")
         snapshot()
     }
 
     fun startManualSos(): GuardianState = synchronized(lock) {
         if (!state.armed) return state
         val occurredAt = now()
+        val location = locationSource?.let { runCatching { it.recentLocation() }.getOrNull() }
+            ?.takeIf { it.isUsable(occurredAt, MANUAL_LOCATION_MAX_AGE_MS) }
         val text = GuardianAlertText.sos(
             GuardianAlertText.timeText(occurredAt, zoneOffsetMs()),
         )
+        val incidentId = nextIncidentId(occurredAt)
         val began = GuardianStateMachine.begin(
-            state, nextIncidentId(occurredAt), occurredAt,
+            state, incidentId, occurredAt,
             peakG = 0.0, beforeImpact = "manual", stillnessSeconds = 0,
             manual = true, text = text,
         )
-        commit(began)
-        beginSend(began.incidentId ?: return snapshot())
+        if (began.incidentId != incidentId) return state
+        locationIncidentId = began.incidentId
+        incidentLocation = location
+        commit(began, eventLabel = "Manual SOS started")
+        beginSend(began.incidentId ?: return snapshot(), "Manual SOS send started")
         snapshot()
     }
 
@@ -137,13 +151,35 @@ class GuardianRuntime(
         val text = GuardianAlertText.fall(
             impact.peakG, timeText, impact.stillnessSeconds,
         )
+        val incidentId = nextIncidentId(impact.detectedTMs.toLong())
         val began = GuardianStateMachine.begin(
-            state, nextIncidentId(impact.detectedTMs.toLong()), now(),
+            state, incidentId, now(),
             impact.peakG, impact.beforeImpact, impact.stillnessSeconds,
             manual = false, text = text,
         )
-        commit(began)
+        if (began.incidentId != incidentId) return state
+        commit(began, eventLabel = "Fall detected; countdown started")
+        locationIncidentId = began.incidentId
+        incidentLocation = null
+        if (began.stage == "counting") {
+            runCatching {
+                locationSource?.requestCurrent { location ->
+                    if (location != null) acceptLocation(incidentId, location)
+                }
+            }
+        }
         return began
+    }
+
+    /** Accepts only a useful fix for the still-counting incident that requested it. */
+    private fun acceptLocation(incidentId: String, location: EmergencyLocation) = synchronized(lock) {
+        val current = state
+        val deadline = current.deadlineEpochMs ?: return@synchronized
+        if (locationIncidentId != incidentId || current.incidentId != incidentId ||
+            current.stage != "counting" || now() >= deadline ||
+            !location.isUsable(now(), FALL_LOCATION_MAX_AGE_MS)
+        ) return@synchronized
+        incidentLocation = location
     }
 
     /**
@@ -154,7 +190,7 @@ class GuardianRuntime(
     fun tick(): GuardianState = synchronized(lock) {
         val current = state
         if (!GuardianStateMachine.isDue(current, now())) return current
-        beginSend(current.incidentId ?: return current)
+        beginSend(current.incidentId ?: return current, "Countdown expired; SMS send started")
         return snapshot()
     }
 
@@ -162,7 +198,11 @@ class GuardianRuntime(
     fun onSmsState(incidentId: String, smsState: String, error: String?): GuardianState =
         synchronized(lock) {
             val next = GuardianStateMachine.sms(state, incidentId, smsState, error)
-            if (next != state) commit(next)
+            if (next != state) commit(
+                next,
+                eventLabel = if (next.stage != state.stage) "SMS ${next.stage}" else null,
+                updateHistory = true,
+            )
             state
         }
 
@@ -175,7 +215,11 @@ class GuardianRuntime(
         if (number.isBlank()) return state
         val outboxState = runCatching { sendSms(id, number, text) }.getOrElse { "failed" }
         val next = GuardianStateMachine.sms(state, id, outboxState, null)
-        if (next != state) commit(next)
+        if (next != state) commit(
+            next,
+            eventLabel = if (next.stage != state.stage) "SMS ${next.stage}" else null,
+            updateHistory = true,
+        )
         state
     }
 
@@ -197,11 +241,30 @@ class GuardianRuntime(
      * no-op. That is what makes "exactly one SMS per incident" a property of
      * the state machine rather than something each caller has to remember.
      */
-    private fun beginSend(incidentId: String?) {
+    private fun beginSend(incidentId: String?, sendEvent: String) {
         if (incidentId == null) return
-        val staged = GuardianStateMachine.send(state, incidentId)
-        if (staged.stage != "sending") return
-        commit(staged)
+        val stagedForSend = GuardianStateMachine.send(state, incidentId)
+        if (stagedForSend.stage != "sending") return
+        val usableLocation = incidentLocation?.takeIf {
+            it.isUsable(now(), FALL_LOCATION_MAX_AGE_MS)
+        }
+        val occurredAt = stagedForSend.occurredAtEpochMs ?: now()
+        val timeText = GuardianAlertText.timeText(occurredAt, zoneOffsetMs())
+        val fallbackText = if (stagedForSend.manual) {
+            GuardianAlertText.sos(timeText)
+        } else {
+            GuardianAlertText.fall(
+                stagedForSend.peakG ?: 0.0,
+                timeText,
+                stagedForSend.stillnessSeconds ?: 0,
+            )
+        }
+        val staged = stagedForSend.copy(
+            text = GuardianAlertText.singlePart(
+                stagedForSend.text.orEmpty(), fallbackText, usableLocation,
+            ),
+        )
+        commit(staged, eventLabel = sendEvent)
         val number = staged.number
         val text = staged.text
         if (number.isBlank() || text.isNullOrBlank()) return
@@ -210,19 +273,35 @@ class GuardianRuntime(
         try {
             val stateString = runCatching { sendSms(incidentId, number, text) }
                 .getOrElse { "failed" }
-            commit(GuardianStateMachine.sms(state, incidentId, stateString, null))
+            val next = GuardianStateMachine.sms(state, incidentId, stateString, null)
+            if (next != state) commit(
+                next,
+                eventLabel = if (next.stage != state.stage) "SMS ${next.stage}" else null,
+                updateHistory = true,
+            )
         } finally {
             sending.set(false)
         }
     }
 
-    private fun commit(next: GuardianState) {
+    private fun commit(next: GuardianState, eventLabel: String? = null, updateHistory: Boolean = false) {
         state = next
         store.save(next)
+        if (next.incidentId != null && (eventLabel != null || updateHistory)) {
+            journal.upsert(next)
+            if (eventLabel != null) {
+                journal.appendEvent(next.incidentId, eventLabel, now(), next.error)
+            }
+        }
         emit(next)
     }
 
     private fun nextIncidentId(atMs: Long): String = "INC-" + atMs + "-" + java.util.UUID.randomUUID()
+
+    private companion object {
+        const val FALL_LOCATION_MAX_AGE_MS = 30_000L
+        const val MANUAL_LOCATION_MAX_AGE_MS = 120_000L
+    }
 
     /**
      * CascadeDetector works in SystemClock.elapsedRealtime millis; the incident

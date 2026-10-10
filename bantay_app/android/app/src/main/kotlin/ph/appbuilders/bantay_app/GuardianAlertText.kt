@@ -17,14 +17,36 @@ object GuardianAlertText {
     const val BANTAY_ALERT = "BANTAY ALERT"
 
     fun fall(peakG: Double, timeText: String, stillnessSeconds: Int): String =
-        "$BANTAY_ALERT: A possible fall was detected at $timeText. " +
-            "A sudden ${formatG(peakG)} impact was recorded, followed by " +
-            "$stillnessSeconds seconds of limited movement. " +
-            "Please check on me immediately."
+        "$BANTAY_ALERT: Posibleng nahulog ako noong $timeText. " +
+            "Lakas ng tama ${formatG(peakG)}; ${stillnessSeconds}s na kaunting galaw. " +
+            "Pakitingnan agad."
 
     fun sos(timeText: String): String =
-        "$BANTAY_ALERT: I need help at $timeText. " +
-            "Location unavailable. Please check on me."
+        "$BANTAY_ALERT: Kailangan ko ng tulong ngayong $timeText."
+
+    /** Appends location after optional Path 2 wording, so a model cannot omit it. */
+    fun withLocation(body: String, location: EmergencyLocation?): String {
+        if (location == null) {
+            return if (body.contains("Lokasyon hindi matukoy.") ||
+                body.contains("Lokasyon: hindi matukoy.")) body
+            else "$body Lokasyon hindi matukoy."
+        }
+        val withoutFallback = body.replace(" GPS unavailable.", "")
+            .replace(" Location unavailable.", "")
+            .replace(" Lokasyon hindi matukoy.", "")
+            .replace(" Lokasyon: hindi matukoy.", "")
+        return "$withoutFallback ${location.toSmsSuffix()}"
+    }
+
+    /** Use model wording only when the complete alert fits one GSM-7 segment. */
+    fun singlePart(body: String, fallback: String, location: EmergencyLocation?): String {
+        val candidate = withLocation(body, location)
+        return if (isSingleGsmSegment(candidate)) candidate
+        else withLocation(fallback, location)
+    }
+
+    private fun isSingleGsmSegment(text: String): Boolean =
+        text.length <= GSM7_SINGLE_SEGMENT_LIMIT && text.all { it in GSM7_SAFE_CHARACTERS }
 
     /** One decimal, always, so the fact check can compare it against `peakG`. */
     fun formatG(peakG: Double): String = String.format("%.1fg", peakG)
@@ -48,4 +70,8 @@ object GuardianAlertText {
         val meridiem = if (hours24 < 12) "AM" else "PM"
         return "$hour12:${minutes.toString().padStart(2, '0')} $meridiem"
     }
+
+    private const val GSM7_SINGLE_SEGMENT_LIMIT = 160
+    private const val GSM7_SAFE_CHARACTERS =
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,;:!?+-/%'()="
 }

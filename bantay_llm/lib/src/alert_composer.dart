@@ -31,14 +31,22 @@ class AlertComposer {
   AlertResult fallback(ImpactFacts facts, AlertLanguage language) =>
       AlertResult(_fallback(facts, language), llmUsed: false);
 
-  Future<AlertResult> compose(ImpactFacts facts, AlertLanguage language) async {
-    final fallback = _fallback(facts, language);
+  Future<AlertResult> compose(
+    ImpactFacts facts,
+    AlertLanguage language, {
+    bool includeLocation = true,
+  }) async {
+    final fallback = _fallback(
+      facts,
+      language,
+      includeLocation: includeLocation,
+    );
     final generator = _generator;
     if (generator == null) return AlertResult(fallback, llmUsed: false);
 
     try {
       final output = await generator
-          .generate(_prompt(facts, language))
+          .generate(_prompt(facts, language, includeLocation: includeLocation))
           .timeout(
             timeout,
             onTimeout: () {
@@ -48,7 +56,12 @@ class AlertComposer {
           );
       final candidate = output.trim();
       onCandidate?.call(candidate);
-      if (_isGrounded(candidate, facts, language)) {
+      if (_isGrounded(
+        candidate,
+        facts,
+        language,
+        includeLocation: includeLocation,
+      )) {
         return AlertResult(candidate, llmUsed: true);
       }
     } catch (_) {
@@ -57,7 +70,11 @@ class AlertComposer {
     return AlertResult(fallback, llmUsed: false);
   }
 
-  String _prompt(ImpactFacts facts, AlertLanguage language) {
+  String _prompt(
+    ImpactFacts facts,
+    AlertLanguage language, {
+    required bool includeLocation,
+  }) {
     final requestedLanguage = language == AlertLanguage.tagalog
         ? 'Tagalog'
         : 'English';
@@ -65,28 +82,39 @@ class AlertComposer {
         ? 'Posibleng pagkahulog'
         : 'Possible fall';
     final motion = facts.afterImpact == AfterImpact.noMovement
-        ? 'No movement for ${facts.stillnessSeconds} seconds'
-        : 'Moved immediately';
-    final before = facts.beforeImpact.name;
+        ? language == AlertLanguage.tagalog
+              ? 'walang galaw sa loob ng ${facts.stillnessSeconds} segundo'
+              : 'no movement for ${facts.stillnessSeconds} seconds'
+        : language == AlertLanguage.tagalog
+        ? 'gumalaw agad'
+        : 'moved immediately';
+    final before = switch ((language, facts.beforeImpact)) {
+      (AlertLanguage.english, BeforeImpact.walking) => 'walking',
+      (AlertLanguage.english, BeforeImpact.still) => 'still',
+      (AlertLanguage.english, BeforeImpact.running) => 'running',
+      (AlertLanguage.english, BeforeImpact.unknown) => 'unknown movement',
+      (AlertLanguage.tagalog, BeforeImpact.walking) => 'naglalakad',
+      (AlertLanguage.tagalog, BeforeImpact.still) => 'nakatigil',
+      (AlertLanguage.tagalog, BeforeImpact.running) => 'tumatakbo',
+      (AlertLanguage.tagalog, BeforeImpact.unknown) => 'di tiyak ang galaw',
+    };
     final location = facts.coordinatesText ?? 'Location unavailable';
-    final contact = facts.contactName.replaceAll(RegExp(r'[\r\n\t]'), ' ');
-    return 'You write BANTAY safety alerts. Reply in $requestedLanguage with one '
-        'calm, factual SMS under 40 words. Start with "BANTAY alert:". '
-        'Use "$uncertainEvent", not a confirmed diagnosis. '
-        'Include before-impact state, after-impact state, and location. '
-        'Use only these facts. Keep numeric strings exactly as shown. '
-        'Do not claim injury, consciousness, or safety. '
-        'Do not add any new numbers.\n'
-        'Impact: ${facts.impactText}\n'
-        'Time: ${facts.timeText}\n'
-        'Before impact: $before\n'
-        'After impact: $motion\n'
-        'Location: $location\n'
-        'Contact: $contact\n'
-        'MESSAGE:';
+    final locationInstruction = includeLocation
+        ? ' Include location: $location.'
+        : ' Native app adds GPS; omit location.';
+    return 'Write one $requestedLanguage SMS, under 30 words. Use only '
+        '$requestedLanguage words except the BANTAY label; no English. Start '
+        '"BANTAY alert:". Say "$uncertainEvent". Use only facts; no '
+        'injury or safety claims; add no numbers.$locationInstruction\n'
+        'Time ${facts.timeText}; impact ${facts.impactText}; before $before; '
+        'after $motion.\nSMS:';
   }
 
-  String _fallback(ImpactFacts facts, AlertLanguage language) {
+  String _fallback(
+    ImpactFacts facts,
+    AlertLanguage language, {
+    bool includeLocation = true,
+  }) {
     final location = facts.coordinatesText;
     if (language == AlertLanguage.tagalog) {
       final before = switch (facts.beforeImpact) {
@@ -98,9 +126,12 @@ class AlertComposer {
       final after = facts.afterImpact == AfterImpact.noMovement
           ? 'walang galaw sa loob ng ${facts.stillnessSeconds} segundo'
           : 'gumalaw agad';
+      final locationText = includeLocation
+          ? ' Lokasyon: ${location ?? 'hindi matukoy'}.'
+          : '';
       return 'BANTAY alert: Posibleng pagkahulog noong ${facts.timeText}. '
-          'Lakas ng tama: ${facts.impactText}. $before bago nito; $after. '
-          'Lokasyon: ${location ?? 'hindi matukoy'}. Pakitingnan siya.';
+          'Lakas ng tama: ${facts.impactText}. $before bago nito; $after.'
+          '$locationText Pakitingnan siya agad.';
     }
 
     final before = switch (facts.beforeImpact) {
@@ -112,12 +143,20 @@ class AlertComposer {
     final after = facts.afterImpact == AfterImpact.noMovement
         ? 'no movement for ${facts.stillnessSeconds} seconds'
         : 'moved immediately';
+    final locationText = includeLocation
+        ? ' Location: ${location ?? 'Location unavailable'}.'
+        : '';
     return 'BANTAY alert: Possible fall at ${facts.timeText}. '
-        '${facts.impactText} impact. Before: $before; after: $after. '
-        'Location: ${location ?? 'Location unavailable'}. Please check on them.';
+        '${facts.impactText} impact. Before: $before; after: $after.'
+        '$locationText Please check on them.';
   }
 
-  bool _isGrounded(String text, ImpactFacts facts, AlertLanguage language) {
+  bool _isGrounded(
+    String text,
+    ImpactFacts facts,
+    AlertLanguage language, {
+    required bool includeLocation,
+  }) {
     if (!text.startsWith('BANTAY alert:') ||
         text.isEmpty ||
         text.length > 320 ||
@@ -127,10 +166,15 @@ class AlertComposer {
         !text.contains(facts.timeText)) {
       return false;
     }
-    final coordinates = facts.coordinatesText;
+    final coordinates = includeLocation ? facts.coordinatesText : null;
     if (coordinates != null && !text.contains(coordinates)) return false;
     final lower = text.toLowerCase();
-    if (coordinates == null &&
+    if (!includeLocation &&
+        (lower.contains('location') || lower.contains('lokasyon'))) {
+      return false;
+    }
+    if (includeLocation &&
+        coordinates == null &&
         !lower.contains('location unavailable') &&
         !lower.contains('hindi matukoy')) {
       return false;
@@ -177,6 +221,12 @@ class AlertComposer {
     }
     if (language == AlertLanguage.tagalog &&
         !lower.contains('posibleng pagkahulog')) {
+      return false;
+    }
+    if (language == AlertLanguage.tagalog &&
+        RegExp(
+          r'\b(?:possible|fall|impact|before|after|location|please|check|help|movement|still)\b',
+        ).hasMatch(lower)) {
       return false;
     }
     if (lower.contains(

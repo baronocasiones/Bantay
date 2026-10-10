@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:bantay_app/alerts/alert_gateway.dart';
+import 'package:bantay_app/alerts/incident_history.dart';
 import 'package:flutter/services.dart';
 
 const nativeIncidentChannelName = 'ph.appbuilders.bantay_app/alerts';
@@ -83,8 +84,9 @@ class NativeIncidentSnapshot {
           : null,
       peakG: peakG is num ? peakG.toDouble() : null,
       beforeImpact: raw['beforeImpact'] as String?,
-      stillnessSeconds:
-          stillnessSeconds is num ? stillnessSeconds.toInt() : null,
+      stillnessSeconds: stillnessSeconds is num
+          ? stillnessSeconds.toInt()
+          : null,
       manual: raw['manual'] == true,
       text: raw['text'] as String?,
       number: raw['number'] as String?,
@@ -169,6 +171,26 @@ class NativeIncidentGateway implements AlertGateway {
         await _channel.invokeMethod<Object?>('incidentSnapshot'),
       );
 
+  Future<List<IncidentHistoryRecord>> historySnapshot() async {
+    final raw = await _channel.invokeMethod<Object?>('incidentHistorySnapshot');
+    if (raw is! Map || raw['error'] != null) {
+      throw const FormatException('Incident history is unavailable');
+    }
+    final records = raw['records'];
+    if (records is! List) {
+      throw const FormatException('Incident history response is invalid');
+    }
+    return records
+        .map(IncidentHistoryRecord.parse)
+        .whereType<IncidentHistoryRecord>()
+        .toList();
+  }
+
+  Future<NativeIncidentSnapshot?> disarm() async =>
+      NativeIncidentSnapshot.parse(
+        await _channel.invokeMethod<Object?>('disarmGuardian'),
+      );
+
   Future<DetectorDiagnostics?> detectorSnapshot() async =>
       DetectorDiagnostics.parse(
         await _channel.invokeMethod<Object?>('detectorDiagnostics'),
@@ -207,6 +229,10 @@ class NativeIncidentGateway implements AlertGateway {
   @override
   Future<bool> requestSmsPermission() async =>
       await _channel.invokeMethod<bool>('requestSmsPermission') ?? false;
+
+  @override
+  Future<bool> requestLocationPermission() async =>
+      await _channel.invokeMethod<bool>('requestLocationPermission') ?? false;
 
   @override
   Future<SmsSubmission> send({

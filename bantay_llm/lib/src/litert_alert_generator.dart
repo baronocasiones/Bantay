@@ -24,9 +24,7 @@ class LitertAlertGenerator implements AlertGenerator {
       throw FileSystemException('LiteRT-LM model file not found', modelPath);
     }
 
-    await FlutterEdgeAi.initialize(
-      inferenceEngines: const [LiteRtLmEngine()],
-    );
+    await FlutterEdgeAi.initialize(inferenceEngines: const [LiteRtLmEngine()]);
     await FlutterEdgeAi.installModel(
       modelType: ModelType.qwen3,
       fileType: ModelFileType.litertlm,

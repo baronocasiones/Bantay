@@ -68,4 +68,39 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
   });
+
+  test('native gateway can disarm monitoring for safe diagnostics', () async {
+    const channel = MethodChannel(nativeIncidentChannelName);
+    MethodCall? received;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      received = call;
+      return {'armed': false, 'stage': 'idle'};
+    });
+    final gateway = NativeIncidentGateway();
+    final snapshot = await gateway.disarm();
+    expect(received?.method, 'disarmGuardian');
+    expect(snapshot?.armed, isFalse);
+    gateway.dispose();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null);
+  });
+
+  test('native gateway requests optional location permission', () async {
+    const channel = MethodChannel(nativeIncidentChannelName);
+    MethodCall? received;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          received = call;
+          return true;
+        });
+    final gateway = NativeIncidentGateway();
+
+    expect(await gateway.requestLocationPermission(), isTrue);
+    expect(received?.method, 'requestLocationPermission');
+
+    gateway.dispose();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null);
+  });
 }
