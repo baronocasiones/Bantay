@@ -14,6 +14,21 @@ object AlertChannel {
         val event = record.toEvent()
         main.post { channel?.invokeMethod("smsState", event) }
     }
+
+    /**
+     * Pushes an incident snapshot to whatever engine is attached. A detached
+     * engine simply receives nothing: the countdown keeps running in the
+     * service and the next attach reads the persisted snapshot.
+     */
+    fun postState(state: GuardianState) {
+        val event = state.toMap()
+        main.post { channel?.invokeMethod("incidentState", event) }
+    }
+
+    fun postDiagnostics(diagnostics: DetectorDiagnostics) {
+        val event = diagnostics.toMap()
+        main.post { channel?.invokeMethod("detectorDiagnostics", event) }
+    }
 }
 
 fun SmsOutboxRecord.toEvent(): Map<String, Any?> = mapOf(

@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
 import androidx.core.content.ContextCompat
@@ -19,6 +21,8 @@ object SmsGateway {
     private const val EXTRA_ATTEMPT = "attempt"
     private const val EXTRA_PART = "part"
     private var store: SmsOutboxDb? = null
+    private val main = Handler(Looper.getMainLooper())
+    private val scheduledReconciles = mutableSetOf<String>()
     private fun database(context: Context): SmsOutboxDb =
         store ?: SmsOutboxDb(context.applicationContext).also { store = it }
 
@@ -27,19 +31,46 @@ object SmsGateway {
         val existing = db.get(id)
         if (existing != null) return existing // Duplicate id can never change recipient or text.
         val record = SmsOutboxState.enqueue(null, id, number, body)
-        db.put(record)
-        AlertChannel.post(record)
+        persist(context, db, record)
         return dispatch(context, record)
     }
 
-    @Synchronized fun snapshot(context: Context): List<Map<String, Any?>> =
-        database(context).all().map {
+    @Synchronized fun snapshot(context: Context): List<Map<String, Any?>> {
+        reconcileInFlight(context)
+        return database(context).all().map {
             it.toEvent() + mapOf("number" to it.number, "text" to it.body, "attempts" to it.attempts)
         }
+    }
 
     @Synchronized fun retryQueued(context: Context) {
+        reconcileInFlight(context)
         database(context).all().filter(SmsOutboxState::shouldRetry).forEach {
             dispatch(context, it)
+        }
+    }
+
+    @Synchronized fun recordForIncident(context: Context, id: String): SmsOutboxRecord? {
+        reconcileInFlight(context)
+        return database(context).get(id)
+    }
+
+    /** Missing sent callbacks leave outcome unknown; never resend that record. */
+    @Synchronized fun reconcileInFlight(context: Context) {
+        val db = database(context)
+        val now = System.currentTimeMillis()
+        db.all().filter { it.state == "sending" }.forEach { current ->
+            val next = SmsOutboxState.reconcile(current, now)
+            if (next != current) {
+                persist(context, db, next)
+            } else if (scheduledReconciles.add(current.incidentId)) {
+                val remaining = (current.attemptStartedAtEpochMs + 60_000L - now)
+                    .coerceAtLeast(1L)
+                val app = context.applicationContext
+                main.postDelayed({
+                    synchronized(this) { scheduledReconciles.remove(current.incidentId) }
+                    runCatching { reconcileInFlight(app) }
+                }, remaining)
+            }
         }
     }
 
@@ -51,12 +82,10 @@ object SmsGateway {
         val db = database(context)
         if (!hasPermission(context)) {
             val queued = record.copy(error = "sms_permission_required")
-            db.put(queued)
-            AlertChannel.post(queued)
-            return queued
+            return persist(context, db, queued)
         }
         if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY_MESSAGING)) {
-            return persist(db, SmsOutboxState.fail(record, "sms_not_supported"))
+            return persist(context, db, SmsOutboxState.fail(record, "sms_not_supported"))
         }
         val subscriptionId = try {
             SubscriptionManager.getDefaultSmsSubscriptionId()
@@ -65,23 +94,22 @@ object SmsGateway {
         }
         if (subscriptionId == SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
             val queued = record.copy(error = "no_default_sms_sim")
-            db.put(queued)
-            AlertChannel.post(queued)
-            return queued
+            return persist(context, db, queued)
         }
 
         return try {
             @Suppress("DEPRECATION")
             val sms = SmsManager.getSmsManagerForSubscriptionId(subscriptionId)
             val parts = sms.divideMessage(record.body)
-            if (parts.isEmpty()) return persist(db, SmsOutboxState.fail(record, "empty_sms"))
-            val sending = persist(db, SmsOutboxState.dispatch(record, parts.size))
+            if (parts.isEmpty()) return persist(context, db, SmsOutboxState.fail(record, "empty_sms"))
+            val sending = persist(context, db, SmsOutboxState.dispatch(record, parts.size, System.currentTimeMillis()))
             val sent = ArrayList<PendingIntent>(parts.size)
             val delivered = ArrayList<PendingIntent>(parts.size)
             parts.indices.forEach { part ->
                 sent += pending(context, ACTION_SENT, sending, part)
                 delivered += pending(context, ACTION_DELIVERED, sending, part)
             }
+            reconcileInFlight(context)
             if (parts.size == 1) {
                 sms.sendTextMessage(record.number, null, parts[0], sent[0], delivered[0])
             } else {
@@ -89,15 +117,15 @@ object SmsGateway {
             }
             sending
         } catch (_: SecurityException) {
-            persist(db, record.copy(state = "queued", error = "sms_permission_required"))
+            persist(context, db, record.copy(state = "queued", error = "sms_permission_required"))
         } catch (_: IllegalArgumentException) {
-            persist(db, SmsOutboxState.fail(record, "invalid_sms"))
+            persist(context, db, SmsOutboxState.fail(record, "invalid_sms"))
         } catch (_: UnsupportedOperationException) {
-            persist(db, SmsOutboxState.fail(record, "sms_not_supported"))
+            persist(context, db, SmsOutboxState.fail(record, "sms_not_supported"))
         } catch (_: RuntimeException) {
             // We cannot prove whether the modem accepted some parts. Never
             // auto-retry an ambiguous dispatch: duplicate SMS is worse.
-            persist(db, SmsOutboxState.fail(record, "sms_dispatch_error"))
+            persist(context, db, SmsOutboxState.fail(record, "sms_dispatch_error"))
         }
     }
 
@@ -143,12 +171,14 @@ object SmsGateway {
             }
             else -> return
         }
-        if (next != current) persist(db, next)
+        if (next != current) persist(context, db, next)
     }
 
-    private fun persist(db: SmsOutboxDb, record: SmsOutboxRecord): SmsOutboxRecord {
+    private fun persist(context: Context, db: SmsOutboxDb, record: SmsOutboxRecord): SmsOutboxRecord {
         db.put(record)
         AlertChannel.post(record)
+        val app = context.applicationContext
+        main.post { runCatching { Guardian.reconcile(app) } }
         return record
     }
 }

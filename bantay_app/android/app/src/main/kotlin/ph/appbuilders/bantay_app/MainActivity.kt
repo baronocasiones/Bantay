@@ -35,6 +35,7 @@ class MainActivity : FlutterActivity() {
         AlertChannel.channel = alerts
         alertsChannel = alerts
         runCatching { SmsGateway.retryQueued(this) }
+        runCatching { Guardian.reconcile(this) }
     }
 
     override fun onDestroy() {
@@ -82,8 +83,63 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * Flutter-facing contract for the native incident chain.
+     *
+     * Flutter is a viewer and a source of intent here. Every method either
+     * reads state out of [Guardian] or asks it to transition; none of them
+     * decides anything about detection, and none of them can block the chain.
+     * The activity that forwards these calls may be destroyed mid-incident and
+     * the service keeps counting down regardless — which is the whole point of
+     * [GuardianRuntime] living in the service.
+     */
     private fun handleAlertCall(call: MethodCall, result: MethodChannel.Result) {
+        val guardian = runCatching { Guardian.runtime(this) }.getOrNull()
         when (call.method) {
+            "armGuardian" -> {
+                if (guardian == null) return result.resultUnavailable()
+                val name = call.argument<String>("contactName")?.trim().orEmpty()
+                val number = call.argument<String>("number")?.trim().orEmpty()
+                if (name.isEmpty() || number.isEmpty()) {
+                    return result.resultUnavailable()
+                }
+                result.success(guardian.arm(name, number).toMap())
+            }
+            "disarmGuardian" -> {
+                if (guardian == null) return result.resultUnavailable()
+                result.success(guardian.disarm().toMap())
+            }
+            "incidentSnapshot" -> {
+                if (guardian == null) return result.resultUnavailable()
+                result.success(Guardian.reconcile(this).toMap())
+            }
+            "detectorDiagnostics" -> {
+                if (guardian == null) return result.resultUnavailable()
+                result.success(guardian.diagnostics.toMap())
+            }
+            "startManualSos" -> {
+                if (guardian == null) return result.resultUnavailable()
+                result.success(guardian.startManualSos().toMap())
+            }
+            "cancelIncident" -> {
+                if (guardian == null) return result.resultUnavailable()
+                val id = call.argument<String>("incidentId")?.trim().orEmpty()
+                if (id.isEmpty()) return result.resultUnavailable()
+                result.success(guardian.cancel(id).toMap())
+            }
+            "sendHelpNow" -> {
+                if (guardian == null) return result.resultUnavailable()
+                val id = call.argument<String>("incidentId")?.trim().orEmpty()
+                if (id.isEmpty()) return result.resultUnavailable()
+                result.success(guardian.sendNow(id).toMap())
+            }
+            "setIncidentText" -> {
+                if (guardian == null) return result.resultUnavailable()
+                val id = call.argument<String>("incidentId")?.trim().orEmpty()
+                val text = call.argument<String>("text").orEmpty()
+                if (id.isEmpty()) return result.resultUnavailable()
+                result.success(guardian.setIncidentText(id, text))
+            }
             "smsPermissionStatus" -> result.success(hasSmsPermission())
             "requestSmsPermission" -> {
                 if (hasSmsPermission()) {
@@ -119,6 +175,15 @@ class MainActivity : FlutterActivity() {
             }
             else -> result.notImplemented()
         }
+    }
+
+    /**
+     * Answers a call that could not be served with the chain unavailable. Sends
+     * the app's own "unavailable" state rather than throwing, so Flutter
+     * degrades to the fixed alert instead of crashing.
+     */
+    private fun MethodChannel.Result.resultUnavailable() {
+        success(mapOf("stage" to "unavailable", "error" to "incident_chain_unavailable"))
     }
 
     private fun hasSmsPermission() = ContextCompat.checkSelfPermission(

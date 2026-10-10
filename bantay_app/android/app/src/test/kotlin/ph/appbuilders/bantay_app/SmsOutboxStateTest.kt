@@ -62,6 +62,29 @@ class SmsOutboxStateTest {
         assertEquals("failed", record.state)
     }
 
+    @Test fun staleSendingBecomesUnknownWithoutAutomaticRetry() {
+        var record = SmsOutboxState.dispatch(
+            SmsOutboxState.enqueue(null, "fall-8", "+639990000000", "Help"), 1,
+            1_000L
+        )
+        record = SmsOutboxState.markUnknown(record)
+        assertEquals("unknown", record.state)
+        assertFalse(SmsOutboxState.shouldRetry(record))
+        record = SmsOutboxState.sentPart(record, 0)
+        assertEquals("sent", record.state)
+    }
+
+    @Test fun staleSendingReconcilesToUnknownButFreshSendingStaysInFlight() {
+        val record = SmsOutboxState.dispatch(
+            SmsOutboxState.enqueue(null, "fall-9", "+639990000000", "Help"), 1,
+            1_000L
+        )
+        assertEquals("sending", SmsOutboxState.reconcile(record, 60_999L).state)
+        val unknown = SmsOutboxState.reconcile(record, 61_000L)
+        assertEquals("unknown", unknown.state)
+        assertFalse(SmsOutboxState.shouldRetry(unknown))
+    }
+
     @Test fun terminalErrorNeverRetriesAutomatically() {
         val record = SmsOutboxState.fail(
             SmsOutboxState.enqueue(null, "fall-5", "+639990000000", "Help"),
