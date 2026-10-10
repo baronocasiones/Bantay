@@ -1,21 +1,15 @@
-// Bantay host app shell.
-//
-// This shell exists to exercise Path 2 (bantay_llm) on a real arm64 Android
-// phone and record the numbers the demo needs: cold model load time, whether
-// Tagalog output survives the fact check, and how the 2-second timeout behaves.
-//
-// It does NOT implement Path 1 (sensor service, countdown, SMS). Those live in
-// the Kotlin/Dart modules described in architecture.md. See
-// ../architecture.md and ../bantay_llm/README.md.
+// Bantay product entrypoint. Normal builds show the Path 1 guardian and
+// alert chain. BANTAY_DIAGNOSTICS=true opens the retained Path 2/sensor harness.
 
 import 'dart:io';
 
 import 'package:bantay_app/sensor_debug.dart';
+import 'package:bantay_app/ui/product_app.dart';
 import 'package:bantay_llm/bantay_llm.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
-const String _modelFileName = 'qwen3_0_6b_mixed_int4.litertlm';
+const String _modelFileName = 'Qwen3-0.6B_dynamic_wi4b32_afp32.litertlm';
 
 /// Override the model location at build time when the file is not sitting in
 /// the app-private documents directory:
@@ -64,7 +58,8 @@ ImpactFacts sampleFacts() => ImpactFacts(
 void main() {
   // Required before preparing the LiteRT-LM model. See bantay_llm/README.md.
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const BantayApp());
+  const diagnostics = bool.fromEnvironment('BANTAY_DIAGNOSTICS');
+  runApp(diagnostics ? const BantayApp() : const ProductApp());
 }
 
 class BantayApp extends StatelessWidget {
@@ -103,9 +98,7 @@ class BantayApp extends StatelessWidget {
   }
 }
 
-/// Two destinations while the two paths are being built: the Path 2 text
-/// harness and the Path 1 sensor stream debug panel. Path 1 is the product;
-/// the panels exist until the real Setup/Guardian/Incident screens land.
+/// Diagnostic harness only; enabled by BANTAY_DIAGNOSTICS=true.
 class _ShellScaffold extends StatefulWidget {
   const _ShellScaffold({
     required this.modelPathOverride,

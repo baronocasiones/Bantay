@@ -1,21 +1,36 @@
 package ph.appbuilders.bantay_app
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.ToneGenerator
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
+import android.os.VibrationAttributes
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.telephony.PhoneStateListener
+import android.telephony.ServiceState
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 
 /**
  * Path 1, slice 1: the watcher.
@@ -42,19 +57,44 @@ class FallWatchService : Service(), SensorEventListener {
     private var wakeLock: PowerManager.WakeLock? = null
     private val ring = AccelRingBuffer(RING_SAMPLES)
     private var sampling = false
+    private var telephonyManager: TelephonyManager? = null
+    private var telephonyCallback: TelephonyCallback? = null
+    private var legacyPhoneListener: PhoneStateListener? = null
+    private var tone: ToneGenerator? = null
+    private var vibrator: Vibrator? = null
+    private var lastFeedbackAtMs = -2_000L
+    private var lastDiagnosticsAtMs = Double.NEGATIVE_INFINITY
+    private var lastDiagnosticReason = "none"
 
-    /** Drains new samples into [SensorChannel] every 50 ms. Runs on the service thread. */
+    /**
+     * The service's only periodic task, every 50 ms on the service thread.
+     *
+     * It drives two independent things on purpose:
+     * - [emitBatch] is the live UI feed, gated on a Flutter engine being
+     *   attached. Nothing downstream of it is safety-critical.
+     * - the countdown tick, which is always driven. An incident started from
+     *   the Activity (manual SOS) or restored from disk still fires its SMS
+     *   even though nothing is attached, because the tick does not depend on
+     *   the engine the way `emitBatch` does.
+     */
     private val emitter = object : Runnable {
         override fun run() {
             emitBatch()
+            if (guardian.isCounting()) guardian.tick()
+            feedbackIfCounting()
             serviceHandler?.postDelayed(this, EMIT_PERIOD_MS)
         }
     }
+
+    private val guardian: GuardianRuntime by lazy { Guardian.runtime(this) }
+
 
     override fun onCreate() {
         super.onCreate()
         sensorManager = getSystemService(SensorManager::class.java)
         accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        telephonyManager = getSystemService(TelephonyManager::class.java)
+        vibrator = getSystemService(Vibrator::class.java)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -94,9 +134,15 @@ class FallWatchService : Service(), SensorEventListener {
         }
 
         sampling = true
+        watchCellularService()
+        runCatching { SmsGateway.retryQueued(this) }
+        runCatching { Guardian.reconcile(this) }
         Log.i(TAG, "sampling started at ${REQUESTED_HZ}Hz requested (${sensor.name})")
         updateSnapshot(running = true, sensorName = sensor.name, requestedHz = REQUESTED_HZ)
         handler.postDelayed(emitter, EMIT_PERIOD_MS)
+        // A countdown restored from disk is still owed: resume it here rather
+        // than stranding the user in an armed state where nothing happens.
+        if (guardian.isCounting()) guardian.tick()
         pushState(
             running = true,
             error = null,
@@ -107,14 +153,62 @@ class FallWatchService : Service(), SensorEventListener {
 
     private fun stopSampling(reason: String) {
         sampling = false
+        stopWatchingCellularService()
         serviceHandler?.removeCallbacks(emitter)
         serviceHandler = null
         accelerometer?.let { sensorManager?.unregisterListener(this, it) }
         serviceThread?.quitSafely()
         serviceThread = null
         releaseWakeLock()
+        tone?.release()
+        tone = null
         updateSnapshot(running = false, sensorName = null, requestedHz = null)
         pushState(running = false, error = reason)
+    }
+
+    /** Retry only queued alerts when cellular service returns while monitoring. */
+    private fun watchCellularService() {
+        val manager = telephonyManager ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val callback = object : TelephonyCallback(), TelephonyCallback.ServiceStateListener {
+                    override fun onServiceStateChanged(state: ServiceState) {
+                        if (state.state == ServiceState.STATE_IN_SERVICE) {
+                            runCatching { SmsGateway.retryQueued(this@FallWatchService) }
+                        }
+                    }
+                }
+                manager.registerTelephonyCallback(mainExecutor, callback)
+                telephonyCallback = callback
+            } else {
+                @Suppress("DEPRECATION")
+                val listener = object : PhoneStateListener() {
+                    override fun onServiceStateChanged(state: ServiceState?) {
+                        if (state?.state == ServiceState.STATE_IN_SERVICE) {
+                            runCatching { SmsGateway.retryQueued(this@FallWatchService) }
+                        }
+                    }
+                }
+                @Suppress("DEPRECATION")
+                manager.listen(listener, PhoneStateListener.LISTEN_SERVICE_STATE)
+                legacyPhoneListener = listener
+            }
+        } catch (_: SecurityException) {
+            // SMS send still works on service/app start; listener is best effort.
+        } catch (_: UnsupportedOperationException) {
+            // Devices without telephony keep the alert queued.
+        }
+    }
+
+    private fun stopWatchingCellularService() {
+        val manager = telephonyManager ?: return
+        telephonyCallback?.let { manager.unregisterTelephonyCallback(it) }
+        telephonyCallback = null
+        legacyPhoneListener?.let {
+            @Suppress("DEPRECATION")
+            manager.listen(it, PhoneStateListener.LISTEN_NONE)
+        }
+        legacyPhoneListener = null
     }
 
     private fun promoteToForeground() {
@@ -181,7 +275,76 @@ class FallWatchService : Service(), SensorEventListener {
         if (values.size < 3) return
         // event.timestamp is SystemClock.elapsedRealtimeNanos; napkin check:
         // full-precision millis keeps the 20 ms period intact through float32.
-        ring.append(event.timestamp / NS_PER_MS.toDouble(), values[0], values[1], values[2])
+        val tMs = event.timestamp / NS_PER_MS.toDouble()
+        ring.append(tMs, values[0], values[1], values[2])
+        // The cascade is fed here, on the service thread, and is deliberately
+        // NOT gated on isConsumerAttached(). Feeding it from emitBatch() meant
+        // an attached Flutter engine was a dependency of detection: the engine
+        // dies with the Activity, so leaving the app mid-incident stopped the
+        // cascade and silently dropped the pending countdown and its SMS.
+        feedGuardian(tMs, values[0], values[1], values[2])
+    }
+
+    private fun feedGuardian(tMs: Double, x: Float, y: Float, z: Float) {
+        val impact = runCatching {
+            guardian.feedSample(
+                tMs,
+                AccelerationUnits.toG(x.toDouble()),
+                AccelerationUnits.toG(y.toDouble()),
+                AccelerationUnits.toG(z.toDouble()),
+            )
+        }.getOrNull()
+        publishDiagnostics(tMs)
+        if (impact != null) {
+            runCatching { guardian.beginFromImpact(impact) }
+            pushGuardianSnapshot()
+        }
+    }
+
+    /**
+     * Keeps a stale snapshot off the wire. With nothing attached the state is
+     * still durable: the next attach reads it back from
+     * [SharedPrefsIncidentStore] through the snapshot method, so the UI is never
+     * told the service is idle while a countdown is actually running.
+     */
+    private fun pushGuardianSnapshot() {
+        runCatching { AlertChannel.postState(guardian.snapshot()) }
+    }
+
+    private fun publishDiagnostics(tMs: Double) {
+        val diagnostics = guardian.diagnostics
+        if (diagnostics.rejectReason != lastDiagnosticReason ||
+            tMs - lastDiagnosticsAtMs >= 1_000.0) {
+            lastDiagnosticReason = diagnostics.rejectReason
+            lastDiagnosticsAtMs = tMs
+            AlertChannel.postDiagnostics(diagnostics)
+        }
+    }
+
+    /** Alarm and haptic stay in the foreground service when Flutter closes. */
+    private fun feedbackIfCounting() {
+        if (!guardian.isCounting()) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastFeedbackAtMs < 2_000L) return
+        lastFeedbackAtMs = now
+        runCatching {
+            val activeTone = tone ?: ToneGenerator(AudioManager.STREAM_ALARM, 85)
+                .also { tone = it }
+            activeTone.startTone(ToneGenerator.TONE_PROP_BEEP, 350)
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.VIBRATE) !=
+            PackageManager.PERMISSION_GRANTED) return
+        runCatching {
+            val effect = VibrationEffect.createOneShot(300L, VibrationEffect.DEFAULT_AMPLITUDE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                vibrator?.vibrate(effect,
+                    VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator?.vibrate(effect,
+                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).build())
+            }
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
