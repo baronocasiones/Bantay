@@ -14,7 +14,7 @@ dependencies:
 
 Set Android `minSdk` to **30** and build for `arm64-v8a`. The current `flutter_edge_ai_litertlm` Android runtime requires both. This package pins `flutter_edge_ai` 2.1.1 and `flutter_edge_ai_litertlm` 1.10.0. It fetches its verified native library during build; do not add a separate `litertlm-android:latest.release` Gradle dependency.
 
-Obtain a Qwen3-0.6B `.litertlm` file ahead of the demo and pass its absolute path to `prepareFromFile`. Use `Qwen3-0.6B_dynamic_wi4b32_afp32.litertlm` (329 MiB, md5 `0c63f12e688bc91d1bd4577c9858d262`). Do **not** use `qwen3_0_6b_mixed_int4.litertlm`: verified on the demo phone, that file ignores its input and answers every prompt with the same generic English greeting, on-device and under Google's LiteRT-LM CLI alike. Model transfer is setup work; incident handling makes no network request. Keep model files out of source control.
+Obtain a Qwen3-0.6B `.litertlm` file ahead of the demo and pass its absolute path to `prepareFromFile`. Use `Qwen3-0.6B_dynamic_wi4b32_afp32.litertlm` (329 MiB, md5 `0c63f12e688bc91d1bd4577c9858d262`). Do **not** use `qwen3_0_6b_mixed_int4.litertlm`: verified on the demo phone, that file ignores its input and answers every prompt with the same generic English greeting, on-device and under Google's LiteRT-LM CLI alike. Model transfer is setup work; incident handling makes no network request. Keep model files out of source control; download the one file we use from the [`model-qwen3-0.6b-wi4b32-v1` release](../../releases/tag/model-qwen3-0.6b-wi4b32-v1).
 
 `prepareFromFile` takes a `backend` argument. It defaults to `PreferredBackend.cpu`. Prefer GPU on any phone whose OpenCL accelerator loads, because prefill is the bottleneck (see below).
 

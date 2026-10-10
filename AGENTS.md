@@ -54,6 +54,13 @@ every prompt, on-device and under Google's CLI. Always checksum the sideloaded
 copy with `run-as md5sum`; a truncated file appears to load and then fails
 exactly like the broken one.
 
+Model files stay out of source control: `models/` is gitignored and the file is
+too large for git anyway (329 MiB, and GitHub rejects anything over 100 MiB).
+The one file we use is published as a release attachment, tag
+`model-qwen3-0.6b-wi4b32-v1`; download it from there rather than fetching it
+from a link in someone's note. sha256
+`03e7da1eb1108b50dffaa9bb52cc7bcbad2eb0c66ca990267f480c1e545d2856`.
+
 ### Never let Path 2 block the alert
 
 `BantayPath2` never throws. `prepareFromFile` returns `false` on failure.
